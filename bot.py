@@ -17,10 +17,7 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
 CMC_API_KEY = os.getenv("CMC_API_KEY", "").strip()
 
-EXCHANGES = ["okx", "gate", "bybit"]
-
 TIMEFRAME = "4h"
-
 THRESHOLD = 0
 RSI_LENGTH = 14
 
@@ -37,11 +34,9 @@ CMC_MIN_MARKET_CAP = 0
 ENABLE_LONG = True
 
 PORT = int(os.getenv("PORT", "8080"))
-
 ALERTS_FILE = "sent_alerts.json"
 
 app = Flask(__name__)
-
 SESSION = requests.Session()
 
 logging.basicConfig(
@@ -57,44 +52,38 @@ def now_utc():
 def safe_float(x):
     try:
         v = float(x)
-
         if math.isnan(v) or math.isinf(v):
             return None
-
         return v
-
     except:
         return None
 
 
 def load_sent_alerts():
-
     if not os.path.exists(ALERTS_FILE):
         return {}
 
     try:
-
         with open(ALERTS_FILE, "r", encoding="utf-8") as f:
             return json.load(f)
-
     except:
         return {}
 
 
 def save_sent_alerts(data):
-
     try:
+        if len(data) > 5000:
+            data = dict(list(data.items())[-3000:])
 
         with open(ALERTS_FILE, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
-
     except:
         pass
 
 
 def send_telegram(text):
-
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        logging.warning("Telegram token/chat id missing")
         return False
 
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
@@ -107,24 +96,21 @@ def send_telegram(text):
     }
 
     try:
-
         r = SESSION.post(url, json=payload, timeout=20)
-
         return r.status_code == 200
-
-    except:
+    except Exception as e:
+        logging.warning(f"Telegram error: {e}")
         return False
 
 
 def send_welcome_message():
-
     msg = (
         f"🚀 *أهلاً بك في بوت أبو علاوي للتنبيهات*\n\n"
         f"✅ البوت يعمل الآن بنجاح\n"
         f"📊 تحليل العملات الرقمية تلقائياً\n"
-        f"📈 إشارات شراء RSI أقل من 30\n"
+        f"📈 إشارات شراء فقط عند RSI أقل من 30\n"
         f"🕓 الفريم: `{TIMEFRAME}`\n"
-        f"🏦 المنصات: `OKX • Gate • Bybit`\n"
+        f"🏦 المنصة: `OKX`\n"
         f"🌐 المصدر الإضافي: `CoinMarketCap`\n\n"
         f"⚡ يتم فحص السوق وإرسال التنبيهات تلقائياً\n"
         f"🔥 بالتوفيق للجميع\n\n"
@@ -135,11 +121,8 @@ def send_welcome_message():
 
 
 def calc_rsi(close, length=14):
-
     delta = close.diff()
-
     gain = delta.clip(lower=0)
-
     loss = -delta.clip(upper=0)
 
     avg_gain = gain.ewm(
@@ -155,14 +138,12 @@ def calc_rsi(close, length=14):
     ).mean()
 
     rs = avg_gain / avg_loss.replace(0, pd.NA)
-
     rsi = 100 - (100 / (1 + rs))
 
     return rsi.astype(float)
 
 
 def get_cmc_symbols_and_data():
-
     url = "https://pro-api.coinmarketcap.com/v1/cryptocurrency/listings/latest"
 
     headers = {
@@ -179,33 +160,18 @@ def get_cmc_symbols_and_data():
     out = {}
 
     try:
-
-        r = SESSION.get(
-            url,
-            headers=headers,
-            params=params,
-            timeout=30
-        )
-
+        r = SESSION.get(url, headers=headers, params=params, timeout=30)
         r.raise_for_status()
 
         data = r.json().get("data", [])
 
         for item in data:
-
             symbol = item.get("symbol", "").upper()
-
             rank = int(item.get("cmc_rank") or 999999)
 
             quote = item.get("quote", {}).get("USD", {})
-
-            market_cap = float(
-                quote.get("market_cap") or 0
-            )
-
-            volume_24h = float(
-                quote.get("volume_24h") or 0
-            )
+            market_cap = float(quote.get("market_cap") or 0)
+            volume_24h = float(quote.get("volume_24h") or 0)
 
             if not symbol:
                 continue
@@ -223,18 +189,14 @@ def get_cmc_symbols_and_data():
             }
 
         logging.info(f"CMC symbols loaded: {len(out)}")
-
         return out
 
     except Exception as e:
-
         logging.warning(f"CMC failed: {e}")
-
         return {}
 
 
 def get_okx_pairs():
-
     url = "https://www.okx.com/api/v5/public/instruments"
 
     params = {
@@ -244,73 +206,49 @@ def get_okx_pairs():
     out = {}
 
     try:
-
         r = SESSION.get(url, params=params, timeout=30)
-
         r.raise_for_status()
 
         for item in r.json().get("data", []):
-
             if item.get("quoteCcy") == "USDT" and item.get("state") == "live":
-
                 base = item.get("baseCcy", "").upper()
-
                 inst_id = item.get("instId", "")
 
-                out[base] = inst_id
+                if base and inst_id:
+                    out[base] = inst_id
+
+        logging.info(f"OKX pairs loaded: {len(out)}")
 
     except Exception as e:
-
         logging.warning(f"OKX pairs failed: {e}")
 
     return out
 
 
 def normalize_ohlcv(rows):
-
     if not rows:
         return pd.DataFrame()
 
     df = pd.DataFrame(
         rows,
-        columns=[
-            "ts",
-            "open",
-            "high",
-            "low",
-            "close",
-            "volume"
-        ]
+        columns=["ts", "open", "high", "low", "close", "volume"]
     )
 
-    for col in [
-        "open",
-        "high",
-        "low",
-        "close",
-        "volume"
-    ]:
+    for col in ["open", "high", "low", "close", "volume"]:
+        df[col] = pd.to_numeric(df[col], errors="coerce")
 
-        df[col] = pd.to_numeric(
-            df[col],
-            errors="coerce"
-        )
-
-    df["ts"] = pd.to_numeric(
-        df["ts"],
-        errors="coerce"
-    )
-
-    df = df.dropna()
-
+    df["ts"] = pd.to_numeric(df["ts"], errors="coerce")
+    df = df.dropna(subset=["ts", "open", "high", "low", "close"])
     df = df.sort_values("ts").reset_index(drop=True)
 
     return df
 
 
 def fetch_okx_klines(pair, tf="4h", limit=200):
-
-    bar = "4H" if tf == "4h" else "1D"
+    if tf == "4h":
+        bar = "4H"
+    else:
+        bar = "1D"
 
     url = "https://www.okx.com/api/v5/market/candles"
 
@@ -321,7 +259,6 @@ def fetch_okx_klines(pair, tf="4h", limit=200):
     }
 
     r = SESSION.get(url, params=params, timeout=20)
-
     r.raise_for_status()
 
     raw = r.json().get("data", [])
@@ -329,7 +266,6 @@ def fetch_okx_klines(pair, tf="4h", limit=200):
     rows = []
 
     for x in raw:
-
         rows.append([
             x[0],
             x[1],
@@ -343,16 +279,13 @@ def fetch_okx_klines(pair, tf="4h", limit=200):
 
 
 def fetch_daily_diff(pair):
-
     try:
-
         df = fetch_okx_klines(pair, "1d", 5)
 
         if len(df) < 2:
             return None
 
         today = safe_float(df.iloc[-1]["close"])
-
         yesterday = safe_float(df.iloc[-2]["close"])
 
         if today is None or yesterday is None:
@@ -368,30 +301,17 @@ def fetch_daily_diff(pair):
 
 
 def analyze_symbol(symbol, pair, cmc_info):
-
     try:
-
         df = fetch_okx_klines(pair, TIMEFRAME, KLINE_LIMIT)
 
         if df.empty or len(df) < RSI_LENGTH + 5:
             return None
 
-        df["rsi"] = calc_rsi(
-            df["close"],
-            RSI_LENGTH
-        )
+        df["rsi"] = calc_rsi(df["close"], RSI_LENGTH)
 
-        price = safe_float(
-            df.iloc[-1]["close"]
-        )
-
-        rsi = safe_float(
-            df.iloc[-1]["rsi"]
-        )
-
-        candle_ts = int(
-            df.iloc[-1]["ts"]
-        )
+        price = safe_float(df.iloc[-1]["close"])
+        rsi = safe_float(df.iloc[-1]["rsi"])
+        candle_ts = int(df.iloc[-1]["ts"])
 
         if price is None or rsi is None:
             return None
@@ -412,13 +332,8 @@ def analyze_symbol(symbol, pair, cmc_info):
         if not long_condition:
             return None
 
-        stop = price * (
-            1 - STOP_LOSS_PERCENT / 100
-        )
-
-        take = price * (
-            1 + TAKE_PROFIT_PERCENT / 100
-        )
+        stop = price * (1 - STOP_LOSS_PERCENT / 100)
+        take = price * (1 + TAKE_PROFIT_PERCENT / 100)
 
         return {
             "symbol": symbol,
@@ -427,32 +342,19 @@ def analyze_symbol(symbol, pair, cmc_info):
             "close_diff": close_diff,
             "stop": stop,
             "take": take,
-            "market_cap": cmc_info.get(
-                "market_cap",
-                0
-            ),
-            "volume_24h": cmc_info.get(
-                "volume_24h",
-                0
-            ),
-            "rank": cmc_info.get(
-                "rank",
-                "-"
-            ),
+            "market_cap": cmc_info.get("market_cap", 0),
+            "volume_24h": cmc_info.get("volume_24h", 0),
+            "rank": cmc_info.get("rank", "-"),
             "candle_ts": candle_ts
         }
 
     except Exception as e:
-
         logging.warning(f"{symbol} failed: {e}")
-
         return None
 
 
 def format_money(value):
-
     try:
-
         value = float(value)
 
         if value >= 1_000_000_000:
@@ -471,40 +373,33 @@ def format_money(value):
 
 
 def format_signal_message(sig):
-
     diff_pct = sig["close_diff"] * 100
 
     return (
         f"🟢 *إشارة شراء قوية*\n\n"
-
         f"💎 *العملة:* `{sig['symbol']}USDT`\n"
         f"🏦 *المنصة:* `OKX`\n"
         f"🕓 *الفريم:* `4H`\n"
         f"🏅 *CMC Rank:* `{sig['rank']}`\n\n"
-
         f"💰 *السعر الحالي:* `{sig['price']:.8f}`\n"
         f"📈 *RSI:* `{sig['rsi']:.2f}`\n"
         f"📊 *فرق الإغلاق اليومي:* `{diff_pct:.2f}%`\n\n"
-
         f"🏛 *Market Cap:* `{format_money(sig['market_cap'])}`\n"
         f"📦 *24H Volume:* `{format_money(sig['volume_24h'])}`\n\n"
-
         f"🛑 *وقف الخسارة:* `{sig['stop']:.8f}`\n"
         f"🎯 *جني الأرباح:* `{sig['take']:.8f}`\n\n"
-
         f"🚀 *تم اكتشاف فرصة شراء مطابقة للشروط*\n\n"
-
         f"`{now_utc()}`"
     )
 
 
 def scan_once():
-
     sent_alerts = load_sent_alerts()
 
     cmc_data = get_cmc_symbols_and_data()
 
     if not cmc_data:
+        logging.warning("No CMC data loaded")
         return
 
     okx_pairs = get_okx_pairs()
@@ -512,34 +407,28 @@ def scan_once():
     final_pairs = {}
 
     for symbol in cmc_data.keys():
-
         if symbol in okx_pairs:
             final_pairs[symbol] = okx_pairs[symbol]
 
-    logging.info(f"Final watchlist: {len(final_pairs)}")
+    logging.info(f"Final OKX watchlist: {len(final_pairs)}")
 
     total = len(final_pairs)
 
-    for index, (symbol, pair) in enumerate(
-        final_pairs.items(),
-        start=1
-    ):
-
+    for index, (symbol, pair) in enumerate(final_pairs.items(), start=1):
         logging.info(f"[{index}/{total}] تحليل {symbol}")
 
         sig = analyze_symbol(
-            symbol,
-            pair,
-            cmc_data.get(symbol, {})
+            symbol=symbol,
+            pair=pair,
+            cmc_info=cmc_data.get(symbol, {})
         )
 
         if not sig:
             continue
 
-        alert_key = (
-            f"{symbol}_LONG_"
-            f"{sig['candle_ts']}"
-        )
+        current_candle = int(sig["candle_ts"] / (4 * 60 * 60 * 1000))
+
+        alert_key = f"{symbol}_OKX_4H_LONG_{current_candle}"
 
         if alert_key in sent_alerts:
             continue
@@ -549,11 +438,8 @@ def scan_once():
         ok = send_telegram(msg)
 
         if ok:
-
             sent_alerts[alert_key] = now_utc()
-
             save_sent_alerts(sent_alerts)
-
             logging.info(f"Signal sent: {symbol}")
 
         time.sleep(0.25)
@@ -561,7 +447,6 @@ def scan_once():
 
 @app.route("/")
 def home():
-
     return jsonify({
         "ok": True,
         "bot": BOT_NAME,
@@ -571,41 +456,30 @@ def home():
 
 @app.route("/health")
 def health():
-
     return jsonify({
-        "ok": True
+        "ok": True,
+        "time": now_utc()
     })
 
 
 def main():
-
     logging.info(f"{BOT_NAME} Started")
 
     send_welcome_message()
 
     while True:
-
         try:
-
             scan_once()
-
-            logging.info(
-                f"Sleeping {SCAN_INTERVAL_SECONDS}s"
-            )
-
-            time.sleep(
-                SCAN_INTERVAL_SECONDS
-            )
+            logging.info(f"Sleeping {SCAN_INTERVAL_SECONDS}s")
+            time.sleep(SCAN_INTERVAL_SECONDS)
 
         except Exception as e:
-
             logging.exception(e)
-
+            send_telegram(f"⚠️ *Bot Error*\n`{str(e)[:500]}`")
             time.sleep(60)
 
 
 if __name__ == "__main__":
-
     import threading
 
     threading.Thread(
