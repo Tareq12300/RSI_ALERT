@@ -1,9 +1,6 @@
 import os
 import time
-import csv
 import threading
-from datetime import datetime, timezone
-
 import requests
 import pandas as pd
 from flask import Flask
@@ -22,22 +19,20 @@ STOCH_K_PERIOD = int(os.getenv("STOCH_K_PERIOD", "3"))
 STOCH_D_PERIOD = int(os.getenv("STOCH_D_PERIOD", "3"))
 
 STRONG_ALERT_LEVEL = float(os.getenv("STRONG_ALERT_LEVEL", "10"))
-WATCHLIST_LEVEL = float(os.getenv("WATCHLIST_LEVEL", "20"))
 RESET_LEVEL = float(os.getenv("RESET_LEVEL", "50"))
 
 MIN_MARKET_CAP = float(os.getenv("MIN_MARKET_CAP", "50000000"))
 MIN_VOLUME_24H = float(os.getenv("MIN_VOLUME_24H", "5000000"))
 MIN_PRICE_CHANGE_24H_ABS = float(os.getenv("MIN_PRICE_CHANGE_24H_ABS", "1"))
-
 MIN_CONFIDENCE_SCORE = float(os.getenv("MIN_CONFIDENCE_SCORE", "90"))
 
 CMC_BASE = "https://pro-api.coinmarketcap.com"
-SIGNALS_LOG = "signals_log.csv"
 
 EXCLUDED_SYMBOLS = [
-    "JUP",
-    "BNB",
-    "SUI"
+    "JUP", "BNB", "SUI", "TWT",
+    "USDT", "USDC", "DAI", "FDUSD", "TUSD", "USDD", "PYUSD",
+    "FRAX", "BUSD", "USDP", "GUSD", "LUSD", "RLUSD",
+    "OKB", "GT", "BGB", "HT", "LEO", "CRO"
 ]
 
 EXCLUDED_KEYWORDS = [
@@ -45,11 +40,24 @@ EXCLUDED_KEYWORDS = [
     "gaming", "gamefi", "games", "play-to-earn", "p2e",
     "gambling", "betting", "casino", "lottery",
     "metaverse", "nft", "fan-token",
+
     "tokenized", "xstock", "xstocks", "etf",
     "gold tokenized", "gold-backed", "silver-backed",
     "synthetic", "wrapped-stock", "wrapped stock",
     "leveraged", "inverse-etf", "commodity-backed",
-    "stock token", "tokenized stock", "tokenized etf"
+    "stock token", "tokenized stock", "tokenized etf",
+
+    "wallet", "wallets", "trust wallet", "web3 wallet", "crypto wallet",
+    "wallet token",
+
+    "stablecoin", "stablecoins", "usd stablecoin",
+    "usd-pegged", "dollar-pegged", "fiat-backed",
+
+    "exchange token", "exchange coin", "cex token",
+    "centralized exchange",
+
+    "launchpad", "launchpool",
+    "custody", "payment token"
 ]
 
 NEGATIVE_NEWS_KEYWORDS = [
@@ -73,11 +81,12 @@ alert_state = {}
 
 @app.route("/")
 def home():
-    return "Stoch RSI CMC Telegram Bot is running"
+    return "Stoch RSI Smart Telegram Bot is running"
 
 
 def send_telegram(text):
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        print("Missing Telegram variables")
         return
 
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
@@ -142,8 +151,13 @@ def collect_coin_text(coin, info):
     parts.extend(coin.get("tags") or [])
 
     if info:
+        parts.append(str(info.get("name", "")))
+        parts.append(str(info.get("symbol", "")))
         parts.append(str(info.get("description", "")))
         parts.extend(info.get("tags") or [])
+
+        if info.get("category"):
+            parts.append(str(info.get("category")))
 
     return " ".join(parts).lower()
 
@@ -164,10 +178,7 @@ def is_strong_project(coin):
     market_cap = quote.get("market_cap") or 0
     volume_24h = quote.get("volume_24h") or 0
 
-    return (
-        market_cap >= MIN_MARKET_CAP
-        and volume_24h >= MIN_VOLUME_24H
-    )
+    return market_cap >= MIN_MARKET_CAP and volume_24h >= MIN_VOLUME_24H
 
 
 def is_dead_coin(coin, closes):
@@ -188,7 +199,6 @@ def is_dead_coin(coin, closes):
 
     if len(closes) >= 20:
         recent = closes[-20:]
-
         price_range = max(recent) - min(recent)
         avg_price = sum(recent) / len(recent)
 
@@ -219,10 +229,7 @@ def calculate_stoch_rsi(closes):
     lowest_rsi = rsi.rolling(STOCH_RSI_PERIOD).min()
     highest_rsi = rsi.rolling(STOCH_RSI_PERIOD).max()
 
-    stoch_rsi = (
-        (rsi - lowest_rsi)
-        / (highest_rsi - lowest_rsi)
-    ) * 100
+    stoch_rsi = ((rsi - lowest_rsi) / (highest_rsi - lowest_rsi)) * 100
 
     k = stoch_rsi.rolling(STOCH_K_PERIOD).mean()
     d = k.rolling(STOCH_D_PERIOD).mean()
@@ -242,10 +249,7 @@ def calculate_stoch_rsi(closes):
 
 
 def bullish_cross(stoch):
-    return (
-        stoch["prev_k"] <= stoch["prev_d"]
-        and stoch["k"] > stoch["d"]
-    )
+    return stoch["prev_k"] <= stoch["prev_d"] and stoch["k"] > stoch["d"]
 
 
 def fetch_binance(symbol):
@@ -255,11 +259,7 @@ def fetch_binance(symbol):
         "limit": 120
     }
 
-    r = requests.get(
-        EXCHANGES["Binance"],
-        params=params,
-        timeout=15
-    )
+    r = requests.get(EXCHANGES["Binance"], params=params, timeout=15)
 
     if r.status_code != 200:
         return None
@@ -274,11 +274,7 @@ def fetch_okx(symbol):
         "limit": 120
     }
 
-    r = requests.get(
-        EXCHANGES["OKX"],
-        params=params,
-        timeout=15
-    )
+    r = requests.get(EXCHANGES["OKX"], params=params, timeout=15)
 
     if r.status_code != 200:
         return None
@@ -301,11 +297,7 @@ def fetch_bybit(symbol):
         "limit": 120
     }
 
-    r = requests.get(
-        EXCHANGES["Bybit"],
-        params=params,
-        timeout=15
-    )
+    r = requests.get(EXCHANGES["Bybit"], params=params, timeout=15)
 
     if r.status_code != 200:
         return None
@@ -327,11 +319,7 @@ def fetch_gate(symbol):
         "limit": 120
     }
 
-    r = requests.get(
-        EXCHANGES["Gate"],
-        params=params,
-        timeout=15
-    )
+    r = requests.get(EXCHANGES["Gate"], params=params, timeout=15)
 
     if r.status_code != 200:
         return None
@@ -351,11 +339,7 @@ def fetch_bitget(symbol):
         "limit": 120
     }
 
-    r = requests.get(
-        EXCHANGES["Bitget"],
-        params=params,
-        timeout=15
-    )
+    r = requests.get(EXCHANGES["Bitget"], params=params, timeout=15)
 
     if r.status_code != 200:
         return None
@@ -405,6 +389,11 @@ def confidence_score(stoch, coin, is_cross):
     elif stoch["k"] <= 20:
         score += 10
 
+    if stoch["d"] <= 5:
+        score += 10
+    elif stoch["d"] <= 10:
+        score += 5
+
     if is_cross:
         score += 25
 
@@ -412,11 +401,15 @@ def confidence_score(stoch, coin, is_cross):
         score += 15
     elif volume_24h >= 20_000_000:
         score += 10
+    elif volume_24h >= 5_000_000:
+        score += 5
 
     if market_cap >= 1_000_000_000:
         score += 15
     elif market_cap >= 500_000_000:
         score += 10
+    elif market_cap >= 50_000_000:
+        score += 5
 
     return min(score, 100)
 
@@ -445,37 +438,45 @@ def short_description(info):
     desc = info.get("description", "") if info else ""
 
     if not desc:
-        return "No description."
+        return "No description available from CoinMarketCap."
 
     desc = desc.replace("\n", " ").strip()
-
     words = desc.split()
 
-    return " ".join(words[:20]) + ("..." if len(words) > 20 else "")
+    return " ".join(words[:25]) + ("..." if len(words) > 25 else "")
 
 
 def format_alert(coin, info, exchange, stoch, score):
     quote = coin.get("quote", {}).get("USD", {})
 
+    price = quote.get("price") or 0
+    market_cap = quote.get("market_cap") or 0
+    volume_24h = quote.get("volume_24h") or 0
+    change_24h = quote.get("percent_change_24h") or 0
+
     return f"""
 🚨 Strong Oversold Reversal
 
 Coin: {coin.get('name')} ({coin.get('symbol')})
+Rank: #{coin.get('cmc_rank')}
 Exchange: {exchange}
 Timeframe: 4H
 
 Stoch RSI K: {stoch['k']:.2f}
 Stoch RSI D: {stoch['d']:.2f}
-
 Bullish Cross: Yes
+
 Confidence Score: {score}/100
 
-Price: ${quote.get('price', 0):,.6f}
-Market Cap: ${quote.get('market_cap', 0):,.0f}
-Volume 24H: ${quote.get('volume_24h', 0):,.0f}
+Price: ${price:,.6f}
+Market Cap: ${market_cap:,.0f}
+Volume 24H: ${volume_24h:,.0f}
+24H Change: {change_24h:.2f}%
 
 About:
 {short_description(info)}
+
+Not financial advice. Technical alert only.
 """.strip()
 
 
@@ -484,34 +485,34 @@ def run_scan():
 
     try:
         coins = get_top_cryptos()
-
         ids = [coin["id"] for coin in coins]
-
         info_map = get_crypto_info(ids)
 
-        print(f"Loaded {len(coins)} coins")
+        print(f"Loaded {len(coins)} coins from CMC")
 
         for coin in coins:
             symbol = coin.get("symbol", "").upper()
+
+            if not symbol:
+                continue
 
             if symbol in EXCLUDED_SYMBOLS:
                 print(f"Excluded manual symbol: {symbol}")
                 continue
 
             coin_id = str(coin.get("id"))
-
             info = info_map.get(coin_id, {})
 
-            if not symbol:
-                continue
-
             if is_excluded_coin(coin, info):
+                print(f"Excluded category: {symbol}")
                 continue
 
             if has_negative_news_risk(coin, info):
+                print(f"Excluded negative risk: {symbol}")
                 continue
 
             if not is_strong_project(coin):
+                print(f"Weak project: {symbol}")
                 continue
 
             exchange, closes = get_centralized_exchange_data(symbol)
@@ -520,6 +521,7 @@ def run_scan():
                 continue
 
             if is_dead_coin(coin, closes):
+                print(f"Dead coin filter: {symbol}")
                 continue
 
             stoch = calculate_stoch_rsi(closes)
@@ -527,20 +529,15 @@ def run_scan():
             if not stoch:
                 continue
 
-            if not bullish_cross(stoch):
+            is_cross = bullish_cross(stoch)
+
+            if not is_cross:
                 continue
 
-            if (
-                stoch["k"] > STRONG_ALERT_LEVEL
-                or stoch["d"] > STRONG_ALERT_LEVEL
-            ):
+            if stoch["k"] > STRONG_ALERT_LEVEL or stoch["d"] > STRONG_ALERT_LEVEL:
                 continue
 
-            score = confidence_score(
-                stoch,
-                coin,
-                bullish_cross(stoch)
-            )
+            score = confidence_score(stoch, coin, is_cross)
 
             if score < MIN_CONFIDENCE_SCORE:
                 print(f"Low confidence skipped: {symbol} Score={score}")
@@ -549,19 +546,14 @@ def run_scan():
             if not can_send_alert(symbol, stoch):
                 continue
 
-            msg = format_alert(
-                coin,
-                info,
-                exchange,
-                stoch,
-                score
-            )
-
+            msg = format_alert(coin, info, exchange, stoch, score)
             send_telegram(msg)
 
             print(
-                f"ALERT: {symbol} "
-                f"K={stoch['k']:.2f} "
+                f"ALERT SENT: {symbol} | "
+                f"Exchange={exchange} | "
+                f"K={stoch['k']:.2f} | "
+                f"D={stoch['d']:.2f} | "
                 f"Score={score}"
             )
 
@@ -573,17 +565,14 @@ def run_scan():
 
 
 def bot_loop():
-    send_telegram("🚀 Stoch RSI Smart Scanner Started")
+    send_telegram("🚀 Stoch RSI Smart Scanner Started - 4H")
 
     while True:
         run_scan()
         time.sleep(INTERVAL_MINUTES * 60)
 
 
-threading.Thread(
-    target=bot_loop,
-    daemon=True
-).start()
+threading.Thread(target=bot_loop, daemon=True).start()
 
 
 if __name__ == "__main__":
