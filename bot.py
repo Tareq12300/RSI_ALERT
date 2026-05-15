@@ -29,8 +29,16 @@ MIN_MARKET_CAP = float(os.getenv("MIN_MARKET_CAP", "50000000"))
 MIN_VOLUME_24H = float(os.getenv("MIN_VOLUME_24H", "5000000"))
 MIN_PRICE_CHANGE_24H_ABS = float(os.getenv("MIN_PRICE_CHANGE_24H_ABS", "1"))
 
+MIN_CONFIDENCE_SCORE = float(os.getenv("MIN_CONFIDENCE_SCORE", "90"))
+
 CMC_BASE = "https://pro-api.coinmarketcap.com"
 SIGNALS_LOG = "signals_log.csv"
+
+EXCLUDED_SYMBOLS = [
+    "JUP",
+    "BNB",
+    "SUI"
+]
 
 EXCLUDED_KEYWORDS = [
     "meme", "memes", "dog", "cat", "pepe", "shib", "inu",
@@ -70,10 +78,10 @@ def home():
 
 def send_telegram(text):
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-        print("Missing Telegram variables")
         return
 
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+
     payload = {
         "chat_id": TELEGRAM_CHAT_ID,
         "text": text,
@@ -95,6 +103,7 @@ def cmc_headers():
 
 def get_top_cryptos():
     url = f"{CMC_BASE}/v1/cryptocurrency/listings/latest"
+
     params = {
         "start": 1,
         "limit": TOP_LIMIT,
@@ -104,6 +113,7 @@ def get_top_cryptos():
 
     r = requests.get(url, headers=cmc_headers(), params=params, timeout=30)
     r.raise_for_status()
+
     return r.json().get("data", [])
 
 
@@ -112,10 +122,14 @@ def get_crypto_info(ids):
         return {}
 
     url = f"{CMC_BASE}/v2/cryptocurrency/info"
-    params = {"id": ",".join(map(str, ids))}
+
+    params = {
+        "id": ",".join(map(str, ids))
+    }
 
     r = requests.get(url, headers=cmc_headers(), params=params, timeout=30)
     r.raise_for_status()
+
     return r.json().get("data", {})
 
 
@@ -128,13 +142,8 @@ def collect_coin_text(coin, info):
     parts.extend(coin.get("tags") or [])
 
     if info:
-        parts.append(str(info.get("name", "")))
-        parts.append(str(info.get("symbol", "")))
         parts.append(str(info.get("description", "")))
         parts.extend(info.get("tags") or [])
-
-        if info.get("category"):
-            parts.append(str(info.get("category")))
 
     return " ".join(parts).lower()
 
@@ -151,16 +160,21 @@ def has_negative_news_risk(coin, info):
 
 def is_strong_project(coin):
     quote = coin.get("quote", {}).get("USD", {})
+
     market_cap = quote.get("market_cap") or 0
     volume_24h = quote.get("volume_24h") or 0
 
-    return market_cap >= MIN_MARKET_CAP and volume_24h >= MIN_VOLUME_24H
+    return (
+        market_cap >= MIN_MARKET_CAP
+        and volume_24h >= MIN_VOLUME_24H
+    )
 
 
 def is_dead_coin(coin, closes):
     quote = coin.get("quote", {}).get("USD", {})
-    volume_24h = quote.get("volume_24h") or 0
+
     market_cap = quote.get("market_cap") or 0
+    volume_24h = quote.get("volume_24h") or 0
     change_24h = abs(quote.get("percent_change_24h") or 0)
 
     if market_cap < MIN_MARKET_CAP:
@@ -174,11 +188,13 @@ def is_dead_coin(coin, closes):
 
     if len(closes) >= 20:
         recent = closes[-20:]
+
         price_range = max(recent) - min(recent)
         avg_price = sum(recent) / len(recent)
 
         if avg_price > 0:
             range_pct = (price_range / avg_price) * 100
+
             if range_pct < 2:
                 return True
 
@@ -189,6 +205,7 @@ def calculate_stoch_rsi(closes):
     series = pd.Series(closes, dtype="float64")
 
     delta = series.diff()
+
     gain = delta.clip(lower=0)
     loss = -delta.clip(upper=0)
 
@@ -196,12 +213,17 @@ def calculate_stoch_rsi(closes):
     avg_loss = loss.ewm(alpha=1 / STOCH_RSI_PERIOD, adjust=False).mean()
 
     rs = avg_gain / avg_loss
+
     rsi = 100 - (100 / (1 + rs))
 
     lowest_rsi = rsi.rolling(STOCH_RSI_PERIOD).min()
     highest_rsi = rsi.rolling(STOCH_RSI_PERIOD).max()
 
-    stoch_rsi = (rsi - lowest_rsi) / (highest_rsi - lowest_rsi) * 100
+    stoch_rsi = (
+        (rsi - lowest_rsi)
+        / (highest_rsi - lowest_rsi)
+    ) * 100
+
     k = stoch_rsi.rolling(STOCH_K_PERIOD).mean()
     d = k.rolling(STOCH_D_PERIOD).mean()
 
@@ -220,7 +242,10 @@ def calculate_stoch_rsi(closes):
 
 
 def bullish_cross(stoch):
-    return stoch["prev_k"] <= stoch["prev_d"] and stoch["k"] > stoch["d"]
+    return (
+        stoch["prev_k"] <= stoch["prev_d"]
+        and stoch["k"] > stoch["d"]
+    )
 
 
 def fetch_binance(symbol):
@@ -230,7 +255,11 @@ def fetch_binance(symbol):
         "limit": 120
     }
 
-    r = requests.get(EXCHANGES["Binance"], params=params, timeout=15)
+    r = requests.get(
+        EXCHANGES["Binance"],
+        params=params,
+        timeout=15
+    )
 
     if r.status_code != 200:
         return None
@@ -245,7 +274,11 @@ def fetch_okx(symbol):
         "limit": 120
     }
 
-    r = requests.get(EXCHANGES["OKX"], params=params, timeout=15)
+    r = requests.get(
+        EXCHANGES["OKX"],
+        params=params,
+        timeout=15
+    )
 
     if r.status_code != 200:
         return None
@@ -256,6 +289,7 @@ def fetch_okx(symbol):
         return None
 
     data.reverse()
+
     return [float(x[4]) for x in data]
 
 
@@ -267,7 +301,11 @@ def fetch_bybit(symbol):
         "limit": 120
     }
 
-    r = requests.get(EXCHANGES["Bybit"], params=params, timeout=15)
+    r = requests.get(
+        EXCHANGES["Bybit"],
+        params=params,
+        timeout=15
+    )
 
     if r.status_code != 200:
         return None
@@ -278,6 +316,7 @@ def fetch_bybit(symbol):
         return None
 
     data.reverse()
+
     return [float(x[4]) for x in data]
 
 
@@ -288,7 +327,11 @@ def fetch_gate(symbol):
         "limit": 120
     }
 
-    r = requests.get(EXCHANGES["Gate"], params=params, timeout=15)
+    r = requests.get(
+        EXCHANGES["Gate"],
+        params=params,
+        timeout=15
+    )
 
     if r.status_code != 200:
         return None
@@ -308,7 +351,11 @@ def fetch_bitget(symbol):
         "limit": 120
     }
 
-    r = requests.get(EXCHANGES["Bitget"], params=params, timeout=15)
+    r = requests.get(
+        EXCHANGES["Bitget"],
+        params=params,
+        timeout=15
+    )
 
     if r.status_code != 200:
         return None
@@ -343,82 +390,40 @@ def get_centralized_exchange_data(symbol):
     return None, None
 
 
-def short_description(info):
-    desc = info.get("description", "") if info else ""
-
-    if not desc:
-        return "لا يوجد وصف متاح من CoinMarketCap."
-
-    desc = desc.replace("\n", " ").strip()
-    words = desc.split()
-
-    return " ".join(words[:28]) + ("..." if len(words) > 28 else "")
-
-
 def confidence_score(stoch, coin, is_cross):
     quote = coin.get("quote", {}).get("USD", {})
+
     market_cap = quote.get("market_cap") or 0
     volume_24h = quote.get("volume_24h") or 0
 
     score = 50
 
     if stoch["k"] <= 5:
-        score += 20
+        score += 25
     elif stoch["k"] <= 10:
-        score += 15
+        score += 20
     elif stoch["k"] <= 20:
-        score += 8
+        score += 10
 
     if is_cross:
+        score += 25
+
+    if volume_24h >= 100_000_000:
         score += 15
-
-    if volume_24h >= 20_000_000:
+    elif volume_24h >= 20_000_000:
         score += 10
-    elif volume_24h >= 5_000_000:
-        score += 5
 
-    if market_cap >= 500_000_000:
+    if market_cap >= 1_000_000_000:
+        score += 15
+    elif market_cap >= 500_000_000:
         score += 10
-    elif market_cap >= 50_000_000:
-        score += 5
 
     return min(score, 100)
 
 
-def log_signal(signal_type, coin, exchange, stoch, price):
-    file_exists = os.path.exists(SIGNALS_LOG)
-
-    with open(SIGNALS_LOG, "a", newline="", encoding="utf-8") as f:
-        writer = csv.writer(f)
-
-        if not file_exists:
-            writer.writerow([
-                "time",
-                "signal_type",
-                "symbol",
-                "name",
-                "exchange",
-                "price",
-                "stoch_k",
-                "stoch_d"
-            ])
-
-        writer.writerow([
-            datetime.now(timezone.utc).isoformat(),
-            signal_type,
-            coin.get("symbol"),
-            coin.get("name"),
-            exchange,
-            price,
-            round(stoch["k"], 2),
-            round(stoch["d"], 2)
-        ])
-
-
-def can_send_alert(symbol, signal_type, stoch):
+def can_send_alert(symbol, stoch):
     if symbol not in alert_state:
         alert_state[symbol] = {
-            "last_signal": None,
             "armed": True
         }
 
@@ -426,57 +431,51 @@ def can_send_alert(symbol, signal_type, stoch):
 
     if stoch["k"] >= RESET_LEVEL:
         state["armed"] = True
-        state["last_signal"] = None
         return False
 
     if not state["armed"]:
         return False
 
     state["armed"] = False
-    state["last_signal"] = signal_type
 
     return True
 
 
-def format_alert(signal_type, coin, info, exchange, stoch, score):
-    name = coin.get("name", "-")
-    symbol = coin.get("symbol", "-")
-    rank = coin.get("cmc_rank", "-")
+def short_description(info):
+    desc = info.get("description", "") if info else ""
 
+    if not desc:
+        return "No description."
+
+    desc = desc.replace("\n", " ").strip()
+
+    words = desc.split()
+
+    return " ".join(words[:20]) + ("..." if len(words) > 20 else "")
+
+
+def format_alert(coin, info, exchange, stoch, score):
     quote = coin.get("quote", {}).get("USD", {})
-    price = quote.get("price", 0)
-    market_cap = quote.get("market_cap", 0)
-    volume_24h = quote.get("volume_24h", 0)
-    change_24h = quote.get("percent_change_24h", 0)
-
-    desc = short_description(info)
-
-    title = "🚨 Strong Oversold Reversal" if signal_type == "STRONG" else "👀 Watchlist Oversold"
 
     return f"""
-{title}
+🚨 Strong Oversold Reversal
 
-العملة: {name} ({symbol})
-الترتيب: #{rank}
-المنصة المركزية: {exchange}
-الفريم: 4H
+Coin: {coin.get('name')} ({coin.get('symbol')})
+Exchange: {exchange}
+Timeframe: 4H
 
 Stoch RSI K: {stoch['k']:.2f}
 Stoch RSI D: {stoch['d']:.2f}
-Bullish Cross: {'نعم' if bullish_cross(stoch) else 'لا'}
 
+Bullish Cross: Yes
 Confidence Score: {score}/100
 
-السعر: ${price:,.6f}
-Market Cap: ${market_cap:,.0f}
-Volume 24H: ${volume_24h:,.0f}
-24H Change: {change_24h:.2f}%
+Price: ${quote.get('price', 0):,.6f}
+Market Cap: ${quote.get('market_cap', 0):,.0f}
+Volume 24H: ${quote.get('volume_24h', 0):,.0f}
 
-تعريف مختصر:
-{desc}
-
-ملاحظة:
-ليست توصية شراء، فقط تنبيه فني مبني على Stoch RSI والسيولة والفلاتر.
+About:
+{short_description(info)}
 """.strip()
 
 
@@ -485,29 +484,34 @@ def run_scan():
 
     try:
         coins = get_top_cryptos()
+
         ids = [coin["id"] for coin in coins]
+
         info_map = get_crypto_info(ids)
 
-        print(f"Loaded {len(coins)} coins from CMC")
+        print(f"Loaded {len(coins)} coins")
 
         for coin in coins:
             symbol = coin.get("symbol", "").upper()
+
+            if symbol in EXCLUDED_SYMBOLS:
+                print(f"Excluded manual symbol: {symbol}")
+                continue
+
             coin_id = str(coin.get("id"))
+
             info = info_map.get(coin_id, {})
 
             if not symbol:
                 continue
 
             if is_excluded_coin(coin, info):
-                print(f"Excluded category: {symbol}")
                 continue
 
             if has_negative_news_risk(coin, info):
-                print(f"Excluded negative risk: {symbol}")
                 continue
 
             if not is_strong_project(coin):
-                print(f"Weak project: {symbol}")
                 continue
 
             exchange, closes = get_centralized_exchange_data(symbol)
@@ -516,7 +520,6 @@ def run_scan():
                 continue
 
             if is_dead_coin(coin, closes):
-                print(f"Dead coin filter: {symbol}")
                 continue
 
             stoch = calculate_stoch_rsi(closes)
@@ -524,54 +527,69 @@ def run_scan():
             if not stoch:
                 continue
 
-            is_cross = bullish_cross(stoch)
-            score = confidence_score(stoch, coin, is_cross)
-
-            quote = coin.get("quote", {}).get("USD", {})
-            price = quote.get("price", 0)
-
-            signal_type = None
+            if not bullish_cross(stoch):
+                continue
 
             if (
-                stoch["k"] <= STRONG_ALERT_LEVEL
-                and stoch["d"] <= STRONG_ALERT_LEVEL
-                and is_cross
+                stoch["k"] > STRONG_ALERT_LEVEL
+                or stoch["d"] > STRONG_ALERT_LEVEL
             ):
-                signal_type = "STRONG"
+                continue
 
-            elif (
-                stoch["k"] <= WATCHLIST_LEVEL
-                and stoch["d"] <= WATCHLIST_LEVEL
-            ):
-                signal_type = "WATCHLIST"
+            score = confidence_score(
+                stoch,
+                coin,
+                bullish_cross(stoch)
+            )
 
-            if signal_type:
-                if can_send_alert(symbol, signal_type, stoch):
-                    msg = format_alert(signal_type, coin, info, exchange, stoch, score)
-                    send_telegram(msg)
-                    log_signal(signal_type, coin, exchange, stoch, price)
-                    print(
-                        f"{signal_type} sent: {symbol} "
-                        f"K={stoch['k']:.2f} D={stoch['d']:.2f}"
-                    )
+            if score < MIN_CONFIDENCE_SCORE:
+                print(f"Low confidence skipped: {symbol} Score={score}")
+                continue
+
+            if not can_send_alert(symbol, stoch):
+                continue
+
+            msg = format_alert(
+                coin,
+                info,
+                exchange,
+                stoch,
+                score
+            )
+
+            send_telegram(msg)
+
+            print(
+                f"ALERT: {symbol} "
+                f"K={stoch['k']:.2f} "
+                f"Score={score}"
+            )
 
             time.sleep(0.25)
 
     except Exception as e:
         print("Scan error:", e)
-        send_telegram(f"خطأ في البوت: {e}")
+        send_telegram(f"Bot Error: {e}")
 
 
 def bot_loop():
-    send_telegram("بوت Stoch RSI على فريم 4H بدأ العمل.")
+    send_telegram("🚀 Stoch RSI Smart Scanner Started")
+
     while True:
         run_scan()
         time.sleep(INTERVAL_MINUTES * 60)
 
 
-threading.Thread(target=bot_loop, daemon=True).start()
+threading.Thread(
+    target=bot_loop,
+    daemon=True
+).start()
 
 
 if __name__ == "__main__":
     port = int(os.getenv("PORT", "8080"))
-    app.run(host="0.0.0.0", port=port)
+
+    app.run(
+        host="0.0.0.0",
+        port=port
+    )
