@@ -40,22 +40,17 @@ EXCLUDED_KEYWORDS = [
     "gaming", "gamefi", "games", "play-to-earn", "p2e",
     "gambling", "betting", "casino", "lottery",
     "metaverse", "nft", "fan-token",
-
     "tokenized", "xstock", "xstocks", "etf",
     "gold tokenized", "gold-backed", "silver-backed",
     "synthetic", "wrapped-stock", "wrapped stock",
     "leveraged", "inverse-etf", "commodity-backed",
     "stock token", "tokenized stock", "tokenized etf",
-
     "wallet", "wallets", "trust wallet", "web3 wallet", "crypto wallet",
     "wallet token",
-
     "stablecoin", "stablecoins", "usd stablecoin",
     "usd-pegged", "dollar-pegged", "fiat-backed",
-
     "exchange token", "exchange coin", "cex token",
     "centralized exchange",
-
     "launchpad", "launchpool",
     "custody", "payment token"
 ]
@@ -414,6 +409,66 @@ def confidence_score(stoch, coin, is_cross):
     return min(score, 100)
 
 
+def calculate_targets(closes):
+    current_price = closes[-1]
+    recent = closes[-80:]
+
+    resistances = []
+    supports = []
+
+    for i in range(2, len(recent) - 2):
+        price = recent[i]
+
+        if (
+            price > recent[i - 1]
+            and price > recent[i - 2]
+            and price > recent[i + 1]
+            and price > recent[i + 2]
+            and price > current_price
+        ):
+            resistances.append(price)
+
+        if (
+            price < recent[i - 1]
+            and price < recent[i - 2]
+            and price < recent[i + 1]
+            and price < recent[i + 2]
+            and price < current_price
+        ):
+            supports.append(price)
+
+    resistances = sorted(list(set(resistances)))
+    supports = sorted(list(set(supports)), reverse=True)
+
+    while len(resistances) < 5:
+        multiplier = 1 + (0.05 * (len(resistances) + 1))
+        resistances.append(current_price * multiplier)
+
+    target_1 = resistances[0]
+    target_2 = resistances[1]
+    target_3 = resistances[2]
+    target_4 = resistances[3]
+    target_5 = resistances[4]
+
+    stop_loss = supports[0] if len(supports) > 0 else current_price * 0.94
+
+    return {
+        "entry": current_price,
+        "target_1": target_1,
+        "target_2": target_2,
+        "target_3": target_3,
+        "target_4": target_4,
+        "target_5": target_5,
+        "stop_loss": stop_loss,
+        "t1_pct": ((target_1 - current_price) / current_price) * 100,
+        "t2_pct": ((target_2 - current_price) / current_price) * 100,
+        "t3_pct": ((target_3 - current_price) / current_price) * 100,
+        "t4_pct": ((target_4 - current_price) / current_price) * 100,
+        "t5_pct": ((target_5 - current_price) / current_price) * 100,
+        "sl_pct": ((stop_loss - current_price) / current_price) * 100,
+    }
+
+
 def can_send_alert(symbol, stoch):
     if symbol not in alert_state:
         alert_state[symbol] = {
@@ -446,7 +501,7 @@ def short_description(info):
     return " ".join(words[:25]) + ("..." if len(words) > 25 else "")
 
 
-def format_alert(coin, info, exchange, stoch, score):
+def format_alert(coin, info, exchange, stoch, score, targets):
     quote = coin.get("quote", {}).get("USD", {})
 
     price = quote.get("price") or 0
@@ -472,6 +527,18 @@ Price: ${price:,.6f}
 Market Cap: ${market_cap:,.0f}
 Volume 24H: ${volume_24h:,.0f}
 24H Change: {change_24h:.2f}%
+
+🎯 Targets
+Entry: ${targets['entry']:,.6f}
+
+TP1: ${targets['target_1']:,.6f} ({targets['t1_pct']:.2f}%)
+TP2: ${targets['target_2']:,.6f} ({targets['t2_pct']:.2f}%)
+TP3: ${targets['target_3']:,.6f} ({targets['t3_pct']:.2f}%)
+TP4: ${targets['target_4']:,.6f} ({targets['t4_pct']:.2f}%)
+TP5: ${targets['target_5']:,.6f} ({targets['t5_pct']:.2f}%)
+
+🛑 Stop Loss
+${targets['stop_loss']:,.6f} ({targets['sl_pct']:.2f}%)
 
 About:
 {short_description(info)}
@@ -546,7 +613,9 @@ def run_scan():
             if not can_send_alert(symbol, stoch):
                 continue
 
-            msg = format_alert(coin, info, exchange, stoch, score)
+            targets = calculate_targets(closes)
+
+            msg = format_alert(coin, info, exchange, stoch, score, targets)
             send_telegram(msg)
 
             print(
