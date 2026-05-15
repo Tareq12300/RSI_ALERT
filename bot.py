@@ -22,7 +22,13 @@ EXCLUDED_KEYWORDS = [
     "meme", "memes", "dog", "cat",
     "gaming", "gamefi", "games", "play-to-earn", "p2e",
     "gambling", "betting", "casino", "lottery",
-    "metaverse", "nft", "fan-token"
+    "metaverse", "nft", "fan-token",
+
+    "tokenized", "xstock", "xstocks", "etf",
+    "gold tokenized", "gold-backed", "silver-backed",
+    "synthetic", "wrapped-stock", "wrapped stock",
+    "leveraged", "inverse-etf", "commodity-backed",
+    "stock token", "tokenized stock", "tokenized etf"
 ]
 
 EXCHANGES = {
@@ -99,8 +105,10 @@ def is_excluded_coin(coin, info):
 
     if info:
         text_parts.append(str(info.get("name", "")))
+        text_parts.append(str(info.get("symbol", "")))
         text_parts.append(str(info.get("description", "")))
         text_parts.extend(info.get("tags") or [])
+
         category = info.get("category")
         if category:
             text_parts.append(str(category))
@@ -246,21 +254,21 @@ def format_alert(coin, info, exchange, rsi):
     desc = short_description(info)
 
     return f"""
-🚨 *تشبع بيعي قوي*
+🚨 تشبع بيعي قوي
 
-*العملة:* {name} `({symbol})`
-*الترتيب:* #{rank}
-*المنصة المركزية:* {exchange}
-*RSI 4H:* `{rsi:.2f}`
+العملة: {name} ({symbol})
+الترتيب: #{rank}
+المنصة المركزية: {exchange}
+RSI 4H: {rsi:.2f}
 
-*السعر:* `${price:,.6f}`
-*Market Cap:* `${market_cap:,.0f}`
-*Volume 24H:* `${volume_24h:,.0f}`
+السعر: ${price:,.6f}
+Market Cap: ${market_cap:,.0f}
+Volume 24H: ${volume_24h:,.0f}
 
-*تعريف مختصر:*
+تعريف مختصر:
 {desc}
 
-⚠️ ليست توصية شراء، فقط تنبيه فني لوجود RSI أقل من {RSI_MAX}.
+ليست توصية شراء، فقط تنبيه فني لوجود RSI أقل من {RSI_MAX}.
 """.strip()
 
 
@@ -274,7 +282,7 @@ def run_scan():
 
         print(f"Loaded {len(coins)} coins from CMC")
 
-        for index, coin in enumerate(coins, start=1):
+        for coin in coins:
             symbol = coin.get("symbol", "").upper()
             coin_id = str(coin.get("id"))
             info = info_map.get(coin_id, {})
@@ -283,6 +291,7 @@ def run_scan():
                 continue
 
             if is_excluded_coin(coin, info):
+                print(f"Excluded: {symbol}")
                 continue
 
             exchange, closes = get_centralized_exchange_data(symbol)
@@ -305,11 +314,11 @@ def run_scan():
 
     except Exception as e:
         print("Scan error:", e)
-        send_telegram(f"⚠️ خطأ في البوت:\n`{e}`")
+        send_telegram(f"خطأ في البوت: {e}")
 
 
 def bot_loop():
-    send_telegram("🤖 بوت تشبع RSI أقل من 20 بدأ العمل.")
+    send_telegram("بوت RSI أقل من 20 بدأ العمل.")
     while True:
         run_scan()
         time.sleep(INTERVAL_MINUTES * 60)
