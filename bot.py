@@ -1,653 +1,626 @@
 import os
 import time
+import math
+import json
+import logging
 import threading
+from datetime import datetime, timezone
+
 import requests
 import pandas as pd
 from flask import Flask
 
-app = Flask(__name__)
+# =========================
+# ENV VARIABLES
+# =========================
 
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
-CMC_API_KEY = os.getenv("CMC_API_KEY")
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 
-INTERVAL_MINUTES = int(os.getenv("INTERVAL_MINUTES", "60"))
-TOP_LIMIT = int(os.getenv("TOP_LIMIT", "1000"))
+SCAN_INTERVAL = int(os.getenv("SCAN_INTERVAL", "180"))  # seconds
+TIMEFRAME = os.getenv("TIMEFRAME", "4h")  # 15m, 1h, 4h
+CANDLE_LIMIT = int(os.getenv("CANDLE_LIMIT", "120"))
 
-STOCH_RSI_PERIOD = int(os.getenv("STOCH_RSI_PERIOD", "14"))
-STOCH_K_PERIOD = int(os.getenv("STOCH_K_PERIOD", "3"))
-STOCH_D_PERIOD = int(os.getenv("STOCH_D_PERIOD", "3"))
+MIN_CONFIDENCE = int(os.getenv("MIN_CONFIDENCE", "85"))
+MIN_VOLUME_24H_USD = float(os.getenv("MIN_VOLUME_24H_USD", "500000"))
+MIN_VOLUME_SPIKE_X = float(os.getenv("MIN_VOLUME_SPIKE_X", "2.5"))
+MIN_PRICE_CHANGE_24H = float(os.getenv("MIN_PRICE_CHANGE_24H", "-20"))
+MAX_PRICE_CHANGE_24H = float(os.getenv("MAX_PRICE_CHANGE_24H", "80"))
 
-STRONG_ALERT_LEVEL = float(os.getenv("STRONG_ALERT_LEVEL", "10"))
-RESET_LEVEL = float(os.getenv("RESET_LEVEL", "50"))
+MAX_MARKET_CAP_USD = float(os.getenv("MAX_MARKET_CAP_USD", "3000000000"))
+MIN_MARKET_CAP_USD = float(os.getenv("MIN_MARKET_CAP_USD", "1000000"))
 
-MIN_MARKET_CAP = float(os.getenv("MIN_MARKET_CAP", "50000000"))
-MIN_VOLUME_24H = float(os.getenv("MIN_VOLUME_24H", "5000000"))
-MIN_PRICE_CHANGE_24H_ABS = float(os.getenv("MIN_PRICE_CHANGE_24H_ABS", "1"))
-MIN_CONFIDENCE_SCORE = float(os.getenv("MIN_CONFIDENCE_SCORE", "90"))
+COOLDOWN_HOURS = float(os.getenv("COOLDOWN_HOURS", "12"))
+MAX_SYMBOLS_PER_EXCHANGE = int(os.getenv("MAX_SYMBOLS_PER_EXCHANGE", "350"))
 
-CMC_BASE = "https://pro-api.coinmarketcap.com"
+ENABLE_OKX = os.getenv("ENABLE_OKX", "true").lower() == "true"
+ENABLE_BYBIT = os.getenv("ENABLE_BYBIT", "true").lower() == "true"
+ENABLE_GATE = os.getenv("ENABLE_GATE", "true").lower() == "true"
+ENABLE_BITGET = os.getenv("ENABLE_BITGET", "true").lower() == "true"
+ENABLE_MEXC = os.getenv("ENABLE_MEXC", "true").lower() == "true"
 
-EXCLUDED_SYMBOLS = [
-    "JUP", "BNB", "SUI", "TWT",
-    "USDT", "USDC", "DAI", "FDUSD", "TUSD", "USDD", "PYUSD",
-    "FRAX", "BUSD", "USDP", "GUSD", "LUSD", "RLUSD",
-    "OKB", "GT", "BGB", "HT", "LEO", "CRO"
-]
+# CoinGecko is optional. Bot works without it, but market cap / categories become limited.
+COINGECKO_API_KEY = os.getenv("COINGECKO_API_KEY", "")
+ENABLE_COINGECKO_FILTERS = os.getenv("ENABLE_COINGECKO_FILTERS", "true").lower() == "true"
 
-EXCLUDED_KEYWORDS = [
-    "meme", "memes", "dog", "cat", "pepe", "shib", "inu",
-    "gaming", "gamefi", "games", "play-to-earn", "p2e",
-    "gambling", "betting", "casino", "lottery",
-    "metaverse", "nft", "fan-token",
-    "tokenized", "xstock", "xstocks", "etf",
-    "gold tokenized", "gold-backed", "silver-backed",
-    "synthetic", "wrapped-stock", "wrapped stock",
-    "leveraged", "inverse-etf", "commodity-backed",
-    "stock token", "tokenized stock", "tokenized etf",
-    "wallet", "wallets", "trust wallet", "web3 wallet", "crypto wallet",
-    "wallet token",
-    "stablecoin", "stablecoins", "usd stablecoin",
-    "usd-pegged", "dollar-pegged", "fiat-backed",
-    "exchange token", "exchange coin", "cex token",
-    "centralized exchange",
-    "launchpad", "launchpool",
-    "custody", "payment token"
-]
-
-NEGATIVE_NEWS_KEYWORDS = [
-    "hack", "hacked", "exploit", "exploited",
-    "delisting", "delisted",
-    "lawsuit", "sec", "investigation",
-    "bankruptcy", "fraud", "scam",
-    "rug pull", "security breach"
-]
-
-EXCHANGES = {
-    "Binance": "https://api.binance.com/api/v3/klines",
-    "OKX": "https://www.okx.com/api/v5/market/candles",
-    "Bybit": "https://api.bybit.com/v5/market/kline",
-    "Gate": "https://api.gateio.ws/api/v4/spot/candlesticks",
-    "Bitget": "https://api.bitget.com/api/v2/spot/market/candles",
+# Not meme / not stable / not wallet / not ETF / not tokenized stocks
+EXCLUDED_SYMBOLS = {
+    "USDT","USDC","DAI","FDUSD","TUSD","USDE","PYUSD","USDD","FRAX","LUSD","USD1",
+    "DOGE","SHIB","PEPE","BONK","WIF","FLOKI","BOME","MEME","DOGS","TURBO","BABYDOGE",
+    "CAT","MOG","BRETT","PONKE","MEW","POPCAT","NEIRO","SUNDOG","HIPPO","PNUT",
+    "TWT","SAFE","GLDX","XAUT","PAXG",
+    "BNB","JUP","SUI"
 }
 
-alert_state = {}
+EXCLUDED_KEYWORDS = [
+    "DOGE", "SHIB", "PEPE", "FLOKI", "BONK", "WIF", "MEME", "INU", "CAT", "DOG",
+    "BABY", "ELON", "TRUMP", "BIDEN", "MAGA", "PEOPLE", "WOJAK", "PONKE", "POPCAT",
+    "USD", "USDT", "USDC", "DAI", "FDUSD", "USDE",
+    "XSTOCK", "ETF", "TOKENIZED", "STOCK"
+]
 
+EXCLUDED_CG_CATEGORIES = [
+    "meme-token", "memes", "dog-themed-coins", "cat-themed-coins",
+    "stablecoins", "tokenized-stock", "asset-backed-tokens",
+    "wrapped-tokens", "wallets"
+]
+
+STATE_FILE = "state.json"
+
+# =========================
+# LOGGING / WEB SERVER
+# =========================
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s — %(levelname)s — %(message)s")
+app = Flask(__name__)
 
 @app.route("/")
 def home():
-    return "Stoch RSI Smart Telegram Bot is running"
+    return {
+        "ok": True,
+        "bot": "Early Pump Scanner",
+        "timeframe": TIMEFRAME,
+        "scan_interval": SCAN_INTERVAL,
+        "binance": "disabled",
+        "exchanges": enabled_exchanges()
+    }
 
+def enabled_exchanges():
+    ex = []
+    if ENABLE_OKX: ex.append("OKX")
+    if ENABLE_BYBIT: ex.append("Bybit")
+    if ENABLE_GATE: ex.append("Gate")
+    if ENABLE_BITGET: ex.append("Bitget")
+    if ENABLE_MEXC: ex.append("MEXC")
+    return ex
+
+# =========================
+# HELPERS
+# =========================
+
+def request_json(url, params=None, headers=None, timeout=12):
+    r = requests.get(url, params=params or {}, headers=headers or {}, timeout=timeout)
+    r.raise_for_status()
+    return r.json()
+
+def safe_float(x, default=0.0):
+    try:
+        if x is None:
+            return default
+        return float(x)
+    except Exception:
+        return default
+
+def load_state():
+    if os.path.exists(STATE_FILE):
+        try:
+            with open(STATE_FILE, "r") as f:
+                return json.load(f)
+        except Exception:
+            return {}
+    return {}
+
+def save_state(state):
+    try:
+        with open(STATE_FILE, "w") as f:
+            json.dump(state, f, indent=2)
+    except Exception as e:
+        logging.warning(f"Could not save state: {e}")
+
+def is_excluded_symbol(symbol):
+    s = symbol.upper().replace("USDT", "").replace("_", "").replace("-", "").replace("/", "")
+    if s in EXCLUDED_SYMBOLS:
+        return True
+    for k in EXCLUDED_KEYWORDS:
+        if k in s:
+            return True
+    return False
 
 def send_telegram(text):
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-        print("Missing Telegram variables")
+        logging.warning("Telegram variables missing.")
         return
-
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-
     payload = {
         "chat_id": TELEGRAM_CHAT_ID,
         "text": text,
+        "parse_mode": "HTML",
         "disable_web_page_preview": True
     }
-
     try:
-        requests.post(url, json=payload, timeout=20)
+        requests.post(url, json=payload, timeout=15).raise_for_status()
     except Exception as e:
-        print("Telegram error:", e)
+        logging.error(f"Telegram send failed: {e}")
 
+def money(v):
+    v = safe_float(v)
+    if v >= 1_000_000_000:
+        return f"${v/1_000_000_000:.2f}B"
+    if v >= 1_000_000:
+        return f"${v/1_000_000:.2f}M"
+    if v >= 1_000:
+        return f"${v/1_000:.2f}K"
+    return f"${v:.2f}"
 
-def cmc_headers():
-    return {
-        "Accepts": "application/json",
-        "X-CMC_PRO_API_KEY": CMC_API_KEY
-    }
+def pct(v):
+    return f"{v:.2f}%"
 
+# =========================
+# EXCHANGE SYMBOLS
+# =========================
 
-def get_top_cryptos():
-    url = f"{CMC_BASE}/v1/cryptocurrency/listings/latest"
+def get_okx_symbols():
+    data = request_json("https://www.okx.com/api/v5/public/instruments", {"instType": "SPOT"})
+    rows = data.get("data", [])
+    pairs = []
+    for x in rows:
+        inst = x.get("instId", "")
+        if inst.endswith("-USDT"):
+            base = inst.replace("-USDT", "")
+            if not is_excluded_symbol(base):
+                pairs.append({"exchange": "OKX", "symbol": base, "pair": inst})
+    return pairs[:MAX_SYMBOLS_PER_EXCHANGE]
 
-    params = {
-        "start": 1,
-        "limit": TOP_LIMIT,
-        "convert": "USD",
-        "sort": "market_cap"
-    }
+def get_bybit_symbols():
+    data = request_json("https://api.bybit.com/v5/market/instruments-info", {"category": "spot"})
+    rows = data.get("result", {}).get("list", [])
+    pairs = []
+    for x in rows:
+        sym = x.get("symbol", "")
+        quote = x.get("quoteCoin", "")
+        base = x.get("baseCoin", "")
+        status = x.get("status", "")
+        if quote == "USDT" and status == "Trading" and not is_excluded_symbol(base):
+            pairs.append({"exchange": "Bybit", "symbol": base, "pair": sym})
+    return pairs[:MAX_SYMBOLS_PER_EXCHANGE]
 
-    r = requests.get(url, headers=cmc_headers(), params=params, timeout=30)
-    r.raise_for_status()
+def get_gate_symbols():
+    data = request_json("https://api.gateio.ws/api/v4/spot/currency_pairs")
+    pairs = []
+    for x in data:
+        pair = x.get("id", "")
+        base = x.get("base", "")
+        quote = x.get("quote", "")
+        trade_status = x.get("trade_status", "")
+        if quote == "USDT" and trade_status == "tradable" and not is_excluded_symbol(base):
+            pairs.append({"exchange": "Gate", "symbol": base, "pair": pair})
+    return pairs[:MAX_SYMBOLS_PER_EXCHANGE]
 
-    return r.json().get("data", [])
+def get_bitget_symbols():
+    data = request_json("https://api.bitget.com/api/v2/spot/public/symbols")
+    rows = data.get("data", [])
+    pairs = []
+    for x in rows:
+        base = x.get("baseCoin", "")
+        quote = x.get("quoteCoin", "")
+        status = x.get("status", "")
+        sym = x.get("symbol", "")
+        if quote == "USDT" and status == "online" and not is_excluded_symbol(base):
+            pairs.append({"exchange": "Bitget", "symbol": base, "pair": sym})
+    return pairs[:MAX_SYMBOLS_PER_EXCHANGE]
 
+def get_mexc_symbols():
+    data = request_json("https://api.mexc.com/api/v3/exchangeInfo")
+    rows = data.get("symbols", [])
+    pairs = []
+    for x in rows:
+        base = x.get("baseAsset", "")
+        quote = x.get("quoteAsset", "")
+        status = x.get("status", "")
+        sym = x.get("symbol", "")
+        if quote == "USDT" and status in ("1", "ENABLED", "TRADING") and not is_excluded_symbol(base):
+            pairs.append({"exchange": "MEXC", "symbol": base, "pair": sym})
+    return pairs[:MAX_SYMBOLS_PER_EXCHANGE]
 
-def get_crypto_info(ids):
-    if not ids:
+def get_all_symbols():
+    all_pairs = []
+    funcs = []
+    if ENABLE_OKX: funcs.append(get_okx_symbols)
+    if ENABLE_BYBIT: funcs.append(get_bybit_symbols)
+    if ENABLE_GATE: funcs.append(get_gate_symbols)
+    if ENABLE_BITGET: funcs.append(get_bitget_symbols)
+    if ENABLE_MEXC: funcs.append(get_mexc_symbols)
+
+    for fn in funcs:
+        try:
+            pairs = fn()
+            logging.info(f"{pairs[0]['exchange'] if pairs else fn.__name__}: {len(pairs)} pairs")
+            all_pairs.extend(pairs)
+        except Exception as e:
+            logging.warning(f"Failed loading symbols from {fn.__name__}: {e}")
+
+    # keep exchange-specific pairs, but avoid exact duplicate pair on same exchange
+    unique = []
+    seen = set()
+    for p in all_pairs:
+        key = (p["exchange"], p["pair"])
+        if key not in seen:
+            unique.append(p)
+            seen.add(key)
+    logging.info(f"Total watchlist pairs: {len(unique)}")
+    return unique
+
+# =========================
+# CANDLES
+# =========================
+
+def map_tf(exchange, tf):
+    if exchange in ("OKX", "Gate", "Bitget"):
+        return {"15m":"15m","1h":"1H","4h":"4H"}.get(tf, "4H")
+    if exchange == "Bybit":
+        return {"15m":"15","1h":"60","4h":"240"}.get(tf, "240")
+    if exchange == "MEXC":
+        return {"15m":"15m","1h":"60m","4h":"4h"}.get(tf, "4h")
+    return tf
+
+def fetch_candles(item):
+    ex, pair = item["exchange"], item["pair"]
+    tf = map_tf(ex, TIMEFRAME)
+
+    if ex == "OKX":
+        data = request_json("https://www.okx.com/api/v5/market/candles", {"instId": pair, "bar": tf, "limit": CANDLE_LIMIT})
+        rows = data.get("data", [])
+        rows = list(reversed(rows))
+        return pd.DataFrame([{
+            "time": int(r[0]), "open": safe_float(r[1]), "high": safe_float(r[2]),
+            "low": safe_float(r[3]), "close": safe_float(r[4]), "volume": safe_float(r[7])
+        } for r in rows])
+
+    if ex == "Bybit":
+        data = request_json("https://api.bybit.com/v5/market/kline", {"category": "spot", "symbol": pair, "interval": tf, "limit": CANDLE_LIMIT})
+        rows = data.get("result", {}).get("list", [])
+        rows = list(reversed(rows))
+        return pd.DataFrame([{
+            "time": int(r[0]), "open": safe_float(r[1]), "high": safe_float(r[2]),
+            "low": safe_float(r[3]), "close": safe_float(r[4]), "volume": safe_float(r[6])
+        } for r in rows])
+
+    if ex == "Gate":
+        data = request_json("https://api.gateio.ws/api/v4/spot/candlesticks", {"currency_pair": pair, "interval": tf.lower(), "limit": CANDLE_LIMIT})
+        return pd.DataFrame([{
+            "time": int(r[0]), "volume": safe_float(r[1]), "close": safe_float(r[2]),
+            "high": safe_float(r[3]), "low": safe_float(r[4]), "open": safe_float(r[5])
+        } for r in data])
+
+    if ex == "Bitget":
+        data = request_json("https://api.bitget.com/api/v2/spot/market/candles", {"symbol": pair, "granularity": tf, "limit": str(CANDLE_LIMIT)})
+        rows = data.get("data", [])
+        return pd.DataFrame([{
+            "time": int(r[0]), "open": safe_float(r[1]), "high": safe_float(r[2]),
+            "low": safe_float(r[3]), "close": safe_float(r[4]), "volume": safe_float(r[6])
+        } for r in rows])
+
+    if ex == "MEXC":
+        data = request_json("https://api.mexc.com/api/v3/klines", {"symbol": pair, "interval": tf, "limit": CANDLE_LIMIT})
+        return pd.DataFrame([{
+            "time": int(r[0]), "open": safe_float(r[1]), "high": safe_float(r[2]),
+            "low": safe_float(r[3]), "close": safe_float(r[4]), "volume": safe_float(r[7])
+        } for r in data])
+
+    return pd.DataFrame()
+
+# =========================
+# MARKET DATA
+# =========================
+
+cg_cache = {}
+cg_last_load = 0
+
+def load_coingecko_markets():
+    global cg_cache, cg_last_load
+    now = time.time()
+    if cg_cache and now - cg_last_load < 3600:
+        return cg_cache
+
+    if not ENABLE_COINGECKO_FILTERS:
         return {}
 
-    url = f"{CMC_BASE}/v2/cryptocurrency/info"
-
-    params = {
-        "id": ",".join(map(str, ids))
-    }
-
-    r = requests.get(url, headers=cmc_headers(), params=params, timeout=30)
-    r.raise_for_status()
-
-    return r.json().get("data", {})
-
-
-def collect_coin_text(coin, info):
-    parts = [
-        str(coin.get("name", "")),
-        str(coin.get("symbol", "")),
-    ]
-
-    parts.extend(coin.get("tags") or [])
-
-    if info:
-        parts.append(str(info.get("name", "")))
-        parts.append(str(info.get("symbol", "")))
-        parts.append(str(info.get("description", "")))
-        parts.extend(info.get("tags") or [])
-
-        if info.get("category"):
-            parts.append(str(info.get("category")))
-
-    return " ".join(parts).lower()
-
-
-def is_excluded_coin(coin, info):
-    text = collect_coin_text(coin, info)
-    return any(word in text for word in EXCLUDED_KEYWORDS)
-
-
-def has_negative_news_risk(coin, info):
-    text = collect_coin_text(coin, info)
-    return any(word in text for word in NEGATIVE_NEWS_KEYWORDS)
-
-
-def is_strong_project(coin):
-    quote = coin.get("quote", {}).get("USD", {})
-
-    market_cap = quote.get("market_cap") or 0
-    volume_24h = quote.get("volume_24h") or 0
-
-    return market_cap >= MIN_MARKET_CAP and volume_24h >= MIN_VOLUME_24H
-
-
-def is_dead_coin(coin, closes):
-    quote = coin.get("quote", {}).get("USD", {})
-
-    market_cap = quote.get("market_cap") or 0
-    volume_24h = quote.get("volume_24h") or 0
-    change_24h = abs(quote.get("percent_change_24h") or 0)
-
-    if market_cap < MIN_MARKET_CAP:
-        return True
-
-    if volume_24h < MIN_VOLUME_24H:
-        return True
-
-    if change_24h < MIN_PRICE_CHANGE_24H_ABS:
-        return True
-
-    if len(closes) >= 20:
-        recent = closes[-20:]
-        price_range = max(recent) - min(recent)
-        avg_price = sum(recent) / len(recent)
-
-        if avg_price > 0:
-            range_pct = (price_range / avg_price) * 100
-
-            if range_pct < 2:
-                return True
-
-    return False
-
-
-def calculate_stoch_rsi(closes):
-    series = pd.Series(closes, dtype="float64")
-
-    delta = series.diff()
-
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-
-    avg_gain = gain.ewm(alpha=1 / STOCH_RSI_PERIOD, adjust=False).mean()
-    avg_loss = loss.ewm(alpha=1 / STOCH_RSI_PERIOD, adjust=False).mean()
-
-    rs = avg_gain / avg_loss
-
-    rsi = 100 - (100 / (1 + rs))
-
-    lowest_rsi = rsi.rolling(STOCH_RSI_PERIOD).min()
-    highest_rsi = rsi.rolling(STOCH_RSI_PERIOD).max()
-
-    stoch_rsi = ((rsi - lowest_rsi) / (highest_rsi - lowest_rsi)) * 100
-
-    k = stoch_rsi.rolling(STOCH_K_PERIOD).mean()
-    d = k.rolling(STOCH_D_PERIOD).mean()
-
-    k = k.dropna()
-    d = d.dropna()
-
-    if len(k) < 2 or len(d) < 2:
-        return None
-
-    return {
-        "k": float(k.iloc[-1]),
-        "d": float(d.iloc[-1]),
-        "prev_k": float(k.iloc[-2]),
-        "prev_d": float(d.iloc[-2]),
-    }
-
-
-def bullish_cross(stoch):
-    return stoch["prev_k"] <= stoch["prev_d"] and stoch["k"] > stoch["d"]
-
-
-def fetch_binance(symbol):
-    params = {
-        "symbol": f"{symbol}USDT",
-        "interval": "4h",
-        "limit": 120
-    }
-
-    r = requests.get(EXCHANGES["Binance"], params=params, timeout=15)
-
-    if r.status_code != 200:
-        return None
-
-    return [float(x[4]) for x in r.json()]
-
-
-def fetch_okx(symbol):
-    params = {
-        "instId": f"{symbol}-USDT",
-        "bar": "4H",
-        "limit": 120
-    }
-
-    r = requests.get(EXCHANGES["OKX"], params=params, timeout=15)
-
-    if r.status_code != 200:
-        return None
-
-    data = r.json().get("data", [])
-
-    if not data:
-        return None
-
-    data.reverse()
-
-    return [float(x[4]) for x in data]
-
-
-def fetch_bybit(symbol):
-    params = {
-        "category": "spot",
-        "symbol": f"{symbol}USDT",
-        "interval": "240",
-        "limit": 120
-    }
-
-    r = requests.get(EXCHANGES["Bybit"], params=params, timeout=15)
-
-    if r.status_code != 200:
-        return None
-
-    data = r.json().get("result", {}).get("list", [])
-
-    if not data:
-        return None
-
-    data.reverse()
-
-    return [float(x[4]) for x in data]
-
-
-def fetch_gate(symbol):
-    params = {
-        "currency_pair": f"{symbol}_USDT",
-        "interval": "4h",
-        "limit": 120
-    }
-
-    r = requests.get(EXCHANGES["Gate"], params=params, timeout=15)
-
-    if r.status_code != 200:
-        return None
-
-    data = r.json()
-
-    if not data:
-        return None
-
-    return [float(x[2]) for x in data]
-
-
-def fetch_bitget(symbol):
-    params = {
-        "symbol": f"{symbol}USDT",
-        "granularity": "4H",
-        "limit": 120
-    }
-
-    r = requests.get(EXCHANGES["Bitget"], params=params, timeout=15)
-
-    if r.status_code != 200:
-        return None
-
-    data = r.json().get("data", [])
-
-    if not data:
-        return None
-
-    return [float(x[4]) for x in data]
-
-
-def get_centralized_exchange_data(symbol):
-    fetchers = {
-        "Binance": fetch_binance,
-        "OKX": fetch_okx,
-        "Bybit": fetch_bybit,
-        "Gate": fetch_gate,
-        "Bitget": fetch_bitget,
-    }
-
-    for exchange, func in fetchers.items():
-        try:
-            closes = func(symbol)
-
-            if closes and len(closes) >= 50:
-                return exchange, closes
-
-        except Exception as e:
-            print(f"{exchange} failed for {symbol}: {e}")
-
-    return None, None
-
-
-def confidence_score(stoch, coin, is_cross):
-    quote = coin.get("quote", {}).get("USD", {})
-
-    market_cap = quote.get("market_cap") or 0
-    volume_24h = quote.get("volume_24h") or 0
-
-    score = 50
-
-    if stoch["k"] <= 5:
-        score += 25
-    elif stoch["k"] <= 10:
-        score += 20
-    elif stoch["k"] <= 20:
-        score += 10
-
-    if stoch["d"] <= 5:
-        score += 10
-    elif stoch["d"] <= 10:
-        score += 5
-
-    if is_cross:
-        score += 25
-
-    if volume_24h >= 100_000_000:
-        score += 15
-    elif volume_24h >= 20_000_000:
-        score += 10
-    elif volume_24h >= 5_000_000:
-        score += 5
-
-    if market_cap >= 1_000_000_000:
-        score += 15
-    elif market_cap >= 500_000_000:
-        score += 10
-    elif market_cap >= 50_000_000:
-        score += 5
-
-    return min(score, 100)
-
-
-def calculate_targets(closes):
-    current_price = closes[-1]
-    recent = closes[-80:]
-
-    resistances = []
-    supports = []
-
-    for i in range(2, len(recent) - 2):
-        price = recent[i]
-
-        if (
-            price > recent[i - 1]
-            and price > recent[i - 2]
-            and price > recent[i + 1]
-            and price > recent[i + 2]
-            and price > current_price
-        ):
-            resistances.append(price)
-
-        if (
-            price < recent[i - 1]
-            and price < recent[i - 2]
-            and price < recent[i + 1]
-            and price < recent[i + 2]
-            and price < current_price
-        ):
-            supports.append(price)
-
-    resistances = sorted(list(set(resistances)))
-    supports = sorted(list(set(supports)), reverse=True)
-
-    while len(resistances) < 5:
-        multiplier = 1 + (0.05 * (len(resistances) + 1))
-        resistances.append(current_price * multiplier)
-
-    target_1 = resistances[0]
-    target_2 = resistances[1]
-    target_3 = resistances[2]
-    target_4 = resistances[3]
-    target_5 = resistances[4]
-
-    stop_loss = supports[0] if len(supports) > 0 else current_price * 0.94
-
-    return {
-        "entry": current_price,
-        "target_1": target_1,
-        "target_2": target_2,
-        "target_3": target_3,
-        "target_4": target_4,
-        "target_5": target_5,
-        "stop_loss": stop_loss,
-        "t1_pct": ((target_1 - current_price) / current_price) * 100,
-        "t2_pct": ((target_2 - current_price) / current_price) * 100,
-        "t3_pct": ((target_3 - current_price) / current_price) * 100,
-        "t4_pct": ((target_4 - current_price) / current_price) * 100,
-        "t5_pct": ((target_5 - current_price) / current_price) * 100,
-        "sl_pct": ((stop_loss - current_price) / current_price) * 100,
-    }
-
-
-def can_send_alert(symbol, stoch):
-    if symbol not in alert_state:
-        alert_state[symbol] = {
-            "armed": True
-        }
-
-    state = alert_state[symbol]
-
-    if stoch["k"] >= RESET_LEVEL:
-        state["armed"] = True
-        return False
-
-    if not state["armed"]:
-        return False
-
-    state["armed"] = False
-
-    return True
-
-
-def short_description(info):
-    desc = info.get("description", "") if info else ""
-
-    if not desc:
-        return "No description available from CoinMarketCap."
-
-    desc = desc.replace("\n", " ").strip()
-    words = desc.split()
-
-    return " ".join(words[:25]) + ("..." if len(words) > 25 else "")
-
-
-def format_alert(coin, info, exchange, stoch, score, targets):
-    quote = coin.get("quote", {}).get("USD", {})
-
-    price = quote.get("price") or 0
-    market_cap = quote.get("market_cap") or 0
-    volume_24h = quote.get("volume_24h") or 0
-    change_24h = quote.get("percent_change_24h") or 0
-
-    return f"""
-🚨 Strong Oversold Reversal
-
-Coin: {coin.get('name')} ({coin.get('symbol')})
-Rank: #{coin.get('cmc_rank')}
-Exchange: {exchange}
-Timeframe: 4H
-
-Stoch RSI K: {stoch['k']:.2f}
-Stoch RSI D: {stoch['d']:.2f}
-Bullish Cross: Yes
-
-Confidence Score: {score}/100
-
-Price: ${price:,.6f}
-Market Cap: ${market_cap:,.0f}
-Volume 24H: ${volume_24h:,.0f}
-24H Change: {change_24h:.2f}%
-
-🎯 Targets
-Entry: ${targets['entry']:,.6f}
-
-TP1: ${targets['target_1']:,.6f} ({targets['t1_pct']:.2f}%)
-TP2: ${targets['target_2']:,.6f} ({targets['t2_pct']:.2f}%)
-TP3: ${targets['target_3']:,.6f} ({targets['t3_pct']:.2f}%)
-TP4: ${targets['target_4']:,.6f} ({targets['t4_pct']:.2f}%)
-TP5: ${targets['target_5']:,.6f} ({targets['t5_pct']:.2f}%)
-
-🛑 Stop Loss
-${targets['stop_loss']:,.6f} ({targets['sl_pct']:.2f}%)
-
-About:
-{short_description(info)}
-
-Not financial advice. Technical alert only.
-""".strip()
-
-
-def run_scan():
-    print("Starting scan...")
-
+    headers = {}
+    if COINGECKO_API_KEY:
+        headers["x-cg-demo-api-key"] = COINGECKO_API_KEY
+
+    cache = {}
     try:
-        coins = get_top_cryptos()
-        ids = [coin["id"] for coin in coins]
-        info_map = get_crypto_info(ids)
-
-        print(f"Loaded {len(coins)} coins from CMC")
-
-        for coin in coins:
-            symbol = coin.get("symbol", "").upper()
-
-            if not symbol:
-                continue
-
-            if symbol in EXCLUDED_SYMBOLS:
-                print(f"Excluded manual symbol: {symbol}")
-                continue
-
-            coin_id = str(coin.get("id"))
-            info = info_map.get(coin_id, {})
-
-            if is_excluded_coin(coin, info):
-                print(f"Excluded category: {symbol}")
-                continue
-
-            if has_negative_news_risk(coin, info):
-                print(f"Excluded negative risk: {symbol}")
-                continue
-
-            if not is_strong_project(coin):
-                print(f"Weak project: {symbol}")
-                continue
-
-            exchange, closes = get_centralized_exchange_data(symbol)
-
-            if not exchange:
-                continue
-
-            if is_dead_coin(coin, closes):
-                print(f"Dead coin filter: {symbol}")
-                continue
-
-            stoch = calculate_stoch_rsi(closes)
-
-            if not stoch:
-                continue
-
-            is_cross = bullish_cross(stoch)
-
-            if not is_cross:
-                continue
-
-            if stoch["k"] > STRONG_ALERT_LEVEL or stoch["d"] > STRONG_ALERT_LEVEL:
-                continue
-
-            score = confidence_score(stoch, coin, is_cross)
-
-            if score < MIN_CONFIDENCE_SCORE:
-                print(f"Low confidence skipped: {symbol} Score={score}")
-                continue
-
-            if not can_send_alert(symbol, stoch):
-                continue
-
-            targets = calculate_targets(closes)
-
-            msg = format_alert(coin, info, exchange, stoch, score, targets)
-            send_telegram(msg)
-
-            print(
-                f"ALERT SENT: {symbol} | "
-                f"Exchange={exchange} | "
-                f"K={stoch['k']:.2f} | "
-                f"D={stoch['d']:.2f} | "
-                f"Score={score}"
+        for page in range(1, 6):
+            data = request_json(
+                "https://api.coingecko.com/api/v3/coins/markets",
+                {
+                    "vs_currency": "usd",
+                    "order": "volume_desc",
+                    "per_page": 250,
+                    "page": page,
+                    "sparkline": "false",
+                    "price_change_percentage": "24h"
+                },
+                headers=headers,
+                timeout=20
             )
-
-            time.sleep(0.25)
-
+            for x in data:
+                sym = str(x.get("symbol", "")).upper()
+                if sym:
+                    cache[sym] = {
+                        "market_cap": safe_float(x.get("market_cap")),
+                        "volume_24h": safe_float(x.get("total_volume")),
+                        "price_change_24h": safe_float(x.get("price_change_percentage_24h")),
+                        "name": x.get("name", ""),
+                        "id": x.get("id", "")
+                    }
+            time.sleep(1.2)
+        cg_cache = cache
+        cg_last_load = now
+        logging.info(f"CoinGecko markets loaded: {len(cg_cache)} symbols")
+        return cg_cache
     except Exception as e:
-        print("Scan error:", e)
-        send_telegram(f"Bot Error: {e}")
+        logging.warning(f"CoinGecko failed, continuing without full market cap: {e}")
+        return cg_cache or {}
 
+def get_market_info(symbol):
+    markets = load_coingecko_markets()
+    return markets.get(symbol.upper(), {})
 
-def bot_loop():
-    send_telegram("🚀 Stoch RSI Smart Scanner Started - 4H")
+# =========================
+# INDICATORS
+# =========================
+
+def ema(series, span):
+    return series.ewm(span=span, adjust=False).mean()
+
+def rsi(close, period=14):
+    delta = close.diff()
+    gain = delta.where(delta > 0, 0).rolling(period).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(period).mean()
+    rs = gain / loss.replace(0, math.nan)
+    return 100 - (100 / (1 + rs))
+
+def macd(close):
+    fast = ema(close, 12)
+    slow = ema(close, 26)
+    line = fast - slow
+    signal = ema(line, 9)
+    hist = line - signal
+    return line, signal, hist
+
+def analyze(item):
+    df = fetch_candles(item)
+    if df.empty or len(df) < 50:
+        return None
+
+    df = df.dropna().copy()
+    close = df["close"]
+    high = df["high"]
+    low = df["low"]
+    vol = df["volume"]
+
+    last_close = safe_float(close.iloc[-1])
+    prev_close = safe_float(close.iloc[-2])
+    if last_close <= 0:
+        return None
+
+    current_vol = safe_float(vol.iloc[-1])
+    avg20_vol = safe_float(vol.iloc[-21:-1].mean())
+    avg50_vol = safe_float(vol.iloc[-51:-1].mean()) if len(vol) >= 52 else avg20_vol
+
+    if avg20_vol <= 0:
+        return None
+
+    spike_x = current_vol / avg20_vol
+    spike_pct = (spike_x - 1) * 100
+
+    # Volume acceleration: last 3 candles average vs previous 10 average
+    last3_avg = safe_float(vol.iloc[-3:].mean())
+    prev10_avg = safe_float(vol.iloc[-13:-3].mean())
+    acceleration_x = last3_avg / prev10_avg if prev10_avg > 0 else 0
+    acceleration_increasing = acceleration_x >= 1.4
+
+    rsi_val = safe_float(rsi(close).iloc[-1])
+    ema20 = safe_float(ema(close, 20).iloc[-1])
+    ema50 = safe_float(ema(close, 50).iloc[-1])
+    ema200 = safe_float(ema(close, 200).iloc[-1]) if len(close) >= 200 else 0
+
+    _, _, hist = macd(close)
+    macd_hist = safe_float(hist.iloc[-1])
+    macd_hist_prev = safe_float(hist.iloc[-2])
+
+    resistance = safe_float(high.iloc[-31:-1].max())
+    breakout = last_close > resistance and current_vol > avg20_vol * 1.5
+
+    price_change_24h = ((last_close - safe_float(close.iloc[-7])) / safe_float(close.iloc[-7]) * 100) if len(close) >= 7 else 0
+
+    market = get_market_info(item["symbol"])
+    market_cap = safe_float(market.get("market_cap", 0))
+    volume_24h = safe_float(market.get("volume_24h", 0))
+    cg_change_24h = safe_float(market.get("price_change_24h", price_change_24h))
+
+    # Filters
+    if volume_24h and volume_24h < MIN_VOLUME_24H_USD:
+        return None
+    if market_cap and (market_cap < MIN_MARKET_CAP_USD or market_cap > MAX_MARKET_CAP_USD):
+        return None
+    if cg_change_24h < MIN_PRICE_CHANGE_24H or cg_change_24h > MAX_PRICE_CHANGE_24H:
+        return None
+    if spike_x < MIN_VOLUME_SPIKE_X:
+        return None
+
+    score = 0
+    reasons = []
+
+    if spike_x >= 7:
+        score += 25
+        reasons.append("Extreme Volume Spike")
+    elif spike_x >= 4:
+        score += 18
+        reasons.append("Strong Volume Spike")
+    elif spike_x >= 2:
+        score += 10
+        reasons.append("Good Volume Spike")
+
+    if acceleration_increasing:
+        score += 10
+        reasons.append("Volume Acceleration Increasing")
+
+    if breakout:
+        score += 20
+        reasons.append("Breakout Confirmed")
+
+    if ema20 > ema50:
+        score += 12
+        reasons.append("EMA Trend Positive")
+
+    if 45 <= rsi_val <= 72:
+        score += 12
+        reasons.append("Healthy Momentum RSI")
+
+    if macd_hist > macd_hist_prev and macd_hist > 0:
+        score += 12
+        reasons.append("MACD Momentum Rising")
+
+    candle_body = abs(last_close - safe_float(df["open"].iloc[-1]))
+    candle_range = max(safe_float(high.iloc[-1]) - safe_float(low.iloc[-1]), 1e-12)
+    strong_candle = (last_close > prev_close) and (candle_body / candle_range >= 0.45)
+    if strong_candle:
+        score += 9
+        reasons.append("Strong Buyer Candle")
+
+    if volume_24h >= MIN_VOLUME_24H_USD:
+        score += 5
+        reasons.append("Good 24H Volume")
+
+    # Early explosion score cap
+    confidence = min(score, 100)
+    if confidence < MIN_CONFIDENCE:
+        return None
+
+    spike_status = "Extreme" if spike_x >= 7 else "Strong" if spike_x >= 4 else "Good" if spike_x >= 2 else "Weak"
+
+    return {
+        "exchange": item["exchange"],
+        "symbol": item["symbol"],
+        "pair": item["pair"],
+        "price": last_close,
+        "market_cap": market_cap,
+        "volume_24h": volume_24h,
+        "price_change_24h": cg_change_24h,
+        "current_volume": current_vol,
+        "avg20_volume": avg20_vol,
+        "spike_x": spike_x,
+        "spike_pct": spike_pct,
+        "spike_status": spike_status,
+        "acceleration_x": acceleration_x,
+        "acceleration": "Increasing" if acceleration_increasing else "Normal",
+        "rsi": rsi_val,
+        "breakout": breakout,
+        "confidence": confidence,
+        "reasons": reasons
+    }
+
+def format_alert(s):
+    price = s["price"]
+    tp1 = price * 1.08
+    tp2 = price * 1.15
+    tp3 = price * 1.25
+    tp4 = price * 1.40
+    tp5 = price * 1.70
+    sl = price * 0.92
+
+    reasons = "\n".join([f"✅ {r}" for r in s["reasons"]])
+
+    return f"""🚀 <b>EARLY PUMP / BREAKOUT ALERT</b>
+
+<b>Coin:</b> {s['symbol']}/USDT
+<b>Exchange:</b> {s['exchange']}
+<b>Price:</b> ${price:.8f}
+
+📊 <b>Market Data</b>
+<b>Market Cap:</b> {money(s['market_cap']) if s['market_cap'] else 'N/A'}
+<b>24H Volume:</b> {money(s['volume_24h']) if s['volume_24h'] else 'N/A'}
+<b>24H Change:</b> {pct(s['price_change_24h'])}
+
+📈 <b>Volume Spike</b>
+<b>Current Candle Volume:</b> {money(s['current_volume'])}
+<b>Average 20 Candles:</b> {money(s['avg20_volume'])}
+<b>Spike Ratio:</b> {s['spike_x']:.2f}X
+<b>Spike Increase:</b> +{s['spike_pct']:.0f}%
+<b>Status:</b> {s['spike_status']}
+<b>Acceleration:</b> {s['acceleration']} ({s['acceleration_x']:.2f}X)
+
+🔥 <b>Signals</b>
+{reasons}
+
+🎯 <b>Confidence:</b> {s['confidence']}%
+
+🎯 <b>Targets</b>
+TP1: ${tp1:.8f} (+8%)
+TP2: ${tp2:.8f} (+15%)
+TP3: ${tp3:.8f} (+25%)
+TP4: ${tp4:.8f} (+40%)
+TP5: ${tp5:.8f} (+70%)
+
+🛑 <b>Stop Loss:</b> ${sl:.8f} (-8%)
+
+⚠️ ليست توصية مالية. استخدم إدارة مخاطر."""
+
+def scanner_loop():
+    send_telegram("✅ Early Pump Scanner Started\nBinance: Disabled\nMeme coins: Filtered\nMode: CEX Spot USDT")
+    state = load_state()
 
     while True:
-        run_scan()
-        time.sleep(INTERVAL_MINUTES * 60)
+        try:
+            pairs = get_all_symbols()
+            logging.info(f"Scanning {len(pairs)} pairs...")
 
+            sent = 0
+            now = time.time()
 
-threading.Thread(target=bot_loop, daemon=True).start()
+            for idx, item in enumerate(pairs, 1):
+                key = f"{item['exchange']}:{item['symbol']}"
+                last_sent = safe_float(state.get(key, 0))
+                if now - last_sent < COOLDOWN_HOURS * 3600:
+                    continue
 
+                try:
+                    logging.info(f"[{idx}/{len(pairs)}] {item['exchange']} {item['symbol']}")
+                    sig = analyze(item)
+                    if sig:
+                        send_telegram(format_alert(sig))
+                        state[key] = now
+                        save_state(state)
+                        sent += 1
+                        time.sleep(1)
+                except Exception as e:
+                    logging.warning(f"Analyze failed {item}: {e}")
+
+                time.sleep(0.08)
+
+            logging.info(f"Scan finished. Alerts sent: {sent}. Sleeping {SCAN_INTERVAL}s")
+            time.sleep(SCAN_INTERVAL)
+
+        except Exception as e:
+            logging.error(f"Scanner loop error: {e}")
+            time.sleep(30)
 
 if __name__ == "__main__":
-    port = int(os.getenv("PORT", "8080"))
+    t = threading.Thread(target=scanner_loop, daemon=True)
+    t.start()
 
-    app.run(
-        host="0.0.0.0",
-        port=port
-    )
+    port = int(os.getenv("PORT", "8080"))
+    app.run(host="0.0.0.0", port=port)
