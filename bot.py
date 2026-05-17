@@ -715,6 +715,96 @@ TP5: ${tp5:.8f} (+70%)
 
 ⚠️ ليست توصية مالية. استخدم إدارة مخاطر."""
 
+
+
+# =========================
+# TARGET TRACKING
+# =========================
+
+TARGET_LEVELS = {
+    "TP1": 0.08,
+    "TP2": 0.15,
+    "TP3": 0.25,
+    "TP4": 0.40,
+    "TP5": 0.70,
+}
+
+def target_tracking_key(exchange, symbol):
+    return f"target_tracking:{exchange}:{symbol}"
+
+def get_latest_price(item):
+    df = fetch_candles(item)
+    if df.empty or len(df) < 2:
+        return 0.0
+    return safe_float(df["close"].iloc[-1])
+
+def register_target_tracking(signal, state):
+    tracking_key = target_tracking_key(signal["exchange"], signal["symbol"])
+    entry_price = safe_float(signal.get("price", 0))
+
+    if entry_price <= 0:
+        return
+
+    state[tracking_key] = {
+        "entry_price": entry_price,
+        "created_at": time.time(),
+        "hit": {
+            "TP1": False,
+            "TP2": False,
+            "TP3": False,
+            "TP4": False,
+            "TP5": False,
+        }
+    }
+
+def check_active_targets(item, state):
+    tracking_key = target_tracking_key(item["exchange"], item["symbol"])
+    tracking = state.get(tracking_key)
+
+    if not tracking:
+        return
+
+    entry_price = safe_float(tracking.get("entry_price", 0))
+    hit = tracking.get("hit", {})
+
+    if entry_price <= 0:
+        return
+
+    if all(hit.get(tp, False) for tp in TARGET_LEVELS.keys()):
+        return
+
+    current_price = get_latest_price(item)
+
+    if current_price <= 0:
+        return
+
+    changed = False
+
+    for tp_name, pct_gain in TARGET_LEVELS.items():
+        target_price = entry_price * (1 + pct_gain)
+
+        if current_price >= target_price and not hit.get(tp_name, False):
+            gain_percent = pct_gain * 100
+            msg = f"""🎯 <b>تم تحقيق الهدف {tp_name}</b>
+
+<b>Coin:</b> {item['symbol']}/USDT
+<b>Exchange:</b> {item['exchange']}
+<b>Entry Price:</b> ${entry_price:.8f}
+<b>Target Price:</b> ${target_price:.8f}
+<b>Current Price:</b> ${current_price:.8f}
+<b>Profit:</b> +{gain_percent:.0f}%
+
+✅ تم تحقيق الهدف بنجاح"""
+            send_telegram(msg)
+            hit[tp_name] = True
+            changed = True
+
+    if changed:
+        tracking["hit"] = hit
+        state[tracking_key] = tracking
+        save_state(state)
+
+
 # =========================
 # SCANNER LOOP
 # =========================
@@ -735,9 +825,15 @@ def scanner_loop():
             for idx, item in enumerate(pairs, 1):
                 key = f"{item['exchange']}:{item['symbol']}"
 
+                try:
+                    check_active_targets(item, state)
+                except Exception as e:
+                    logging.warning(f"Target check failed {item}: {e}")
+
                 last_sent = safe_float(state.get(key, 0))
 
                 if now - last_sent < COOLDOWN_HOURS * 3600:
+                    time.sleep(0.08)
                     continue
 
                 try:
@@ -746,6 +842,7 @@ def scanner_loop():
 
                     if signal:
                         send_telegram(format_alert(signal))
+                        register_target_tracking(signal, state)
                         state[key] = now
                         save_state(state)
                         sent += 1
