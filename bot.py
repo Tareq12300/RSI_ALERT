@@ -2,6 +2,7 @@ import os
 import time
 import math
 import json
+import re
 import logging
 import threading
 
@@ -24,7 +25,12 @@ CANDLE_LIMIT = int(os.getenv("CANDLE_LIMIT", "120"))
 
 MIN_CONFIDENCE = int(os.getenv("MIN_CONFIDENCE", "85"))
 MIN_VOLUME_24H_USD = float(os.getenv("MIN_VOLUME_24H_USD", "500000"))
-MIN_VOLUME_SPIKE_X = float(os.getenv("MIN_VOLUME_SPIKE_X", "2.5"))
+MIN_VOLUME_SPIKE_X = float(os.getenv("MIN_VOLUME_SPIKE_X", "1.4"))
+
+# Early alert settings: lower = earlier, higher = fewer alerts
+EARLY_NEAR_RESISTANCE_PCT = float(os.getenv("EARLY_NEAR_RESISTANCE_PCT", "1.5"))
+TIGHT_RANGE_MAX_PCT = float(os.getenv("TIGHT_RANGE_MAX_PCT", "12"))
+MAX_RECENT_PRICE_RUN_PCT = float(os.getenv("MAX_RECENT_PRICE_RUN_PCT", "18"))
 
 MIN_PRICE_CHANGE_24H = float(os.getenv("MIN_PRICE_CHANGE_24H", "-20"))
 MAX_PRICE_CHANGE_24H = float(os.getenv("MAX_PRICE_CHANGE_24H", "80"))
@@ -51,14 +57,16 @@ EXCLUDED_SYMBOLS = {
     "DOGE", "SHIB", "PEPE", "BONK", "WIF", "FLOKI", "BOME", "MEME", "DOGS", "TURBO", "BABYDOGE",
     "CAT", "MOG", "BRETT", "PONKE", "MEW", "POPCAT", "NEIRO", "SUNDOG", "HIPPO", "PNUT",
     "TWT", "SAFE", "GLDX", "XAUT", "PAXG",
-    "BNB", "JUP", "SUI"
+    "BNB", "JUP", "SUI",
+    "BTC3L", "BTC3S", "ETH3L", "ETH3S", "TSLA3S", "TSLA3L"
 }
 
 EXCLUDED_KEYWORDS = [
     "DOGE", "SHIB", "PEPE", "FLOKI", "BONK", "WIF", "MEME", "INU", "CAT", "DOG",
     "BABY", "ELON", "TRUMP", "BIDEN", "MAGA", "PEOPLE", "WOJAK", "PONKE", "POPCAT",
     "USD", "USDT", "USDC", "DAI", "FDUSD", "USDE",
-    "XSTOCK", "ETF", "TOKENIZED", "STOCK"
+    "XSTOCK", "ETF", "TOKENIZED", "STOCK",
+    "3L", "3S", "5L", "5S", "BULL", "BEAR", "LEVERAGED"
 ]
 
 # =========================
@@ -129,6 +137,12 @@ def save_state(state):
 
 def is_excluded_symbol(symbol):
     s = symbol.upper().replace("USDT", "").replace("_", "").replace("-", "").replace("/", "")
+
+    # Exclude leveraged tokens like TSLA3S, BTC3L, ETH5S, etc.
+    # These can create misleading pump alerts because they are derivative/leveraged products.
+    if re.search(r"(2L|2S|3L|3S|5L|5S)$", s):
+        return True
+
     if s in EXCLUDED_SYMBOLS:
         return True
 
@@ -558,7 +572,30 @@ def analyze(item):
     macd_hist_prev = safe_float(hist.iloc[-2])
 
     resistance = safe_float(high.iloc[-31:-1].max())
+
+    # Confirmed breakout = safer but usually later.
     breakout = last_close > resistance and current_volume > avg20_volume * 1.5
+
+    # Early setup = price is very close to resistance before the full breakout.
+    near_breakout = (
+        resistance > 0
+        and last_close >= resistance * (1 - EARLY_NEAR_RESISTANCE_PCT / 100)
+        and current_volume > avg20_volume * 1.1
+    )
+
+    recent_range = 0
+    if last_close > 0:
+        recent_range = ((safe_float(high.iloc[-10:].max()) - safe_float(low.iloc[-10:].min())) / last_close) * 100
+
+    tight_range = 0 < recent_range <= TIGHT_RANGE_MAX_PCT
+
+    recent_run_pct = 0
+    if len(close) >= 4 and safe_float(close.iloc[-4]) > 0:
+        recent_run_pct = ((last_close - safe_float(close.iloc[-4])) / safe_float(close.iloc[-4])) * 100
+
+    # Avoid alerts after the coin already pumped too much in the last 3 candles.
+    if recent_run_pct > MAX_RECENT_PRICE_RUN_PCT:
+        return None
 
     price_change_24h_local = 0
     if len(close) >= 7 and safe_float(close.iloc[-7]) > 0:
@@ -601,20 +638,34 @@ def analyze(item):
         reasons.append("Volume Acceleration Increasing")
 
     if breakout:
-        score += 20
+        score += 18
         reasons.append("Breakout Confirmed")
+    elif near_breakout:
+        score += 18
+        reasons.append("Early Near-Breakout Setup")
+
+    if tight_range:
+        score += 12
+        reasons.append("Tight Range Before Move")
 
     if ema20 > ema50:
         score += 12
         reasons.append("EMA Trend Positive")
 
-    if 45 <= rsi_val <= 72:
-        score += 12
-        reasons.append("Healthy Momentum RSI")
+    if 35 <= rsi_val <= 60:
+        score += 14
+        reasons.append("Early Healthy RSI")
+    elif 60 < rsi_val <= 72:
+        score += 8
+        reasons.append("Momentum RSI")
 
-    if macd_hist > macd_hist_prev and macd_hist > 0:
+    if macd_hist > 0 and macd_hist > macd_hist_prev:
         score += 12
         reasons.append("MACD Momentum Rising")
+
+    if macd_hist > 0 and macd_hist_prev > 0 and macd_hist >= macd_hist_prev * 1.15:
+        score += 8
+        reasons.append("MACD Acceleration")
 
     candle_body = abs(last_close - safe_float(df["open"].iloc[-1]))
     candle_range = max(safe_float(high.iloc[-1]) - safe_float(low.iloc[-1]), 1e-12)
@@ -660,6 +711,9 @@ def analyze(item):
         "acceleration": "Increasing" if acceleration_increasing else "Normal",
         "rsi": rsi_val,
         "breakout": breakout,
+        "near_breakout": near_breakout,
+        "recent_range": recent_range,
+        "recent_run_pct": recent_run_pct,
         "confidence": confidence,
         "reasons": reasons
     }
@@ -698,6 +752,8 @@ def format_alert(s):
 <b>Spike Increase:</b> +{s['spike_pct']:.0f}%
 <b>Status:</b> {s['spike_status']}
 <b>Acceleration:</b> {s['acceleration']} ({s['acceleration_x']:.2f}X)
+<b>Recent Range:</b> {s.get('recent_range', 0):.2f}%
+<b>Recent 3-Candle Run:</b> {s.get('recent_run_pct', 0):.2f}%
 
 🔥 <b>Signals</b>
 {reasons}
